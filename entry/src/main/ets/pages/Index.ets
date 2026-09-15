@@ -11,10 +11,18 @@ import { EditorPage } from './EditorPage';
 import { getMenuOptions } from '../common/UIUtils';
 import { NewProjectDialog } from '../dialogs/NewProjectDialog';
 import { RenameProjectDialog } from '../dialogs/RenameProjectDialog';
+import { PrivacyConsent } from './PrivacyConsent';
+import { DialogType, TextType } from '../common/CustomTypes';
+import { PrivacyConsentVM } from '../viewmodels/PrivacyConsentVM';
+import { PrivacyFullPage } from './PrivacyFullPage';
+import { preferences } from '@kit.ArkData';
+import { AboutPage } from './AboutPage';
 
 type SortBy = 'time' | 'name';
 
 const THUMB_MAX_SIDE = 256;
+const PREF_NAME = 'app_settings';
+const KEY_PRIVACY_AGREED = 'privacy_agreed';
 
 class ProjectDataSource implements IDataSource {
   private projects: DrawProject[] = [];
@@ -58,6 +66,11 @@ struct Index {
   @State sortBy: SortBy = 'time';
   @State projectCount: number = 0;
   @State thumbVersion: number = 0;
+  @State isShowingPrivacy: boolean = false;
+  @State isShowingFullPrivacy: boolean = false;
+  @State isShowingAbout: boolean = false;
+
+  private privacyVM:PrivacyConsentVM = new PrivacyConsentVM();
 
   @StorageLink('projectsRefreshToken') @Watch('onProjectsChanged')
   projectsRefreshToken: number = 0;
@@ -80,6 +93,102 @@ struct Index {
     this.loadProjects();
     this.generateMissingThumbs();
     this.cleanOrphanImages();
+    this.initPrivacyVM();
+    this.checkPrivacyConsent();
+  }
+
+  private checkPrivacyConsent() {
+    if (!this.hasAgreedPrivacy()) {
+      this.isShowingPrivacy = true;
+    }
+  }
+
+  private hasAgreedPrivacy(): boolean {
+    try {
+      const pref = preferences.getPreferencesSync(this.context, { name: PREF_NAME });
+      return pref.getSync(KEY_PRIVACY_AGREED, false) as boolean;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  private async markPrivacyAgreed(): Promise<void> {
+    try {
+      const pref = await preferences.getPreferences(this.context, PREF_NAME);
+      await pref.put(KEY_PRIVACY_AGREED, true);
+      await pref.flush();
+    } catch (e) {
+      console.error('写入隐私同意状态失败:', e);
+    }
+  }
+
+  private initPrivacyVM(){
+    this.privacyVM.dialogType = DialogType.SHEET;
+    this.privacyVM.sheetType = SheetType.BOTTOM;
+    this.privacyVM.appName = '竹子画板';
+    this.privacyVM.appDescription = '一个只属于你的画板';
+
+    this.privacyVM.document = [
+      {
+        text: '本应用',
+        type: TextType.PLAIN
+      },
+      {
+        text: '不联网、不申请任何权限、不收集任何数据',
+        type: TextType.PLAIN,
+        color: $r('sys.color.font_primary'),
+        fontWeight: FontWeight.Medium
+      },
+      {
+        text: '。您的所有画作、项目、缩略图都保存在手机本地，' +
+          '不会上传到任何服务器。\n竹子画板是一个开源项目。\n' +
+          '点击"同意"即表示您已知悉以上说明。个人信息处理详情，请参阅',
+        type: TextType.PLAIN
+      },
+      {
+        text:'关于竹子画板与隐私的说明',
+        type:TextType.ACTION,
+        color:$r('app.color.brand'),
+        onAction:()=>{
+          this.isShowingFullPrivacy = true;
+        }
+      },
+      { text:'，', type:TextType.PLAIN },
+      {
+        text:'权限使用说明',
+        type:TextType.ACTION,
+        color:$r('app.color.brand'),
+        onAction:()=>{
+          this.showPermissionInfo();
+        }
+      },
+      { text:'。', type:TextType.PLAIN }
+    ];
+
+    this.privacyVM.onAccept = async () => {
+      this.isShowingPrivacy = false;
+      await this.markPrivacyAgreed();
+    };
+
+    this.privacyVM.onReject = () => {
+      try {
+        this.context.terminateSelf();
+      } catch {}
+    };
+  }
+
+  private showPermissionInfo(): void {
+    AlertDialog.show({
+      title: '权限使用说明',
+      message: '竹子画板不申请任何系统权限。\n\n' +
+        '基于安全访问机制，竹子画板只能访问你主动选择的图片，看不到相册里的其他内容。\n\n' +
+        '应用不会读取你的通讯录、位置、麦克风、摄像头或任何其他个人信息。',
+      confirm: {
+        value: '知道了',
+        action: () => {},
+        fontColor:$r('app.color.brand')
+      }
+    });
   }
 
   private sortProjects(list: DrawProject[], by: SortBy): DrawProject[] {
@@ -462,13 +571,49 @@ struct Index {
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 
+  @Builder
+  buildPrivacy() {
+    PrivacyConsent({model:this.privacyVM})
+  }
+
+  @Builder
+  buildFullPrivacy() {
+    PrivacyFullPage()
+  }
+
+  @Builder
+  buildAbout() {
+    AboutPage({
+      onPermission:()=>{this.showPermissionInfo();},
+      onPrivacy:()=>{this.isShowingFullPrivacy = true;},
+      onCode:()=>{
+        try {
+          this.context.startAbility({
+            action: 'ohos.want.action.viewData',
+            uri: 'https://github.com/Zhuziexe/ZhuziCanvas'
+          }).catch((err: BusinessError) => {
+            console.error('打开浏览器失败:', err);
+          });
+        } catch (e) {
+          console.error('打开浏览器异常:', e);
+        }
+      }
+    })
+  }
+
   build() {
     HdsNavigation(this.pathStack) {
+      Column()
+        .width(0)
+        .height(0)
+        .bindSheet($$this.isShowingAbout,this.buildAbout,{detents:[SheetSize.LARGE],dragBar:false, preferType: SheetType.CENTER })
       Column() {
-        if (this.projectCount === 0) {
-          this.EmptyState()
-        } else {
-          this.ProjectList()
+        if(!this.isShowingPrivacy) {
+          if (this.projectCount === 0) {
+            this.EmptyState()
+          } else {
+            this.ProjectList()
+          }
         }
       }
       .clip(false)
@@ -476,7 +621,18 @@ struct Index {
       .height('100%')
       .backgroundColor($r('sys.color.background_secondary'))
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+      .bindSheet($$this.isShowingPrivacy, this.buildPrivacy,{
+        detents:[SheetSize.LARGE],
+        dragBar:false,
+        showClose:false,
+        preferType: SheetType.CENTER
+      })
     }
+    .bindSheet($$this.isShowingFullPrivacy,this.buildFullPrivacy,{
+      detents:[SheetSize.LARGE],
+      dragBar:false,
+      preferType: SheetType.CENTER
+    })
     .mode(NavigationMode.Stack)
     .navDestination(this.PageMap)
     .titleBar({
@@ -509,14 +665,12 @@ struct Index {
               }
             },
             {
-              content:{
-                label:'关于',
-                icon:$r('sys.symbol.info_circle'),
-                action:()=>this.getUIContext().getPromptAction().showDialog({
-                  title:'关于',
-                  message:'竹子画板1.0.0',
-                  buttons:[{text:'关闭',color:$r('app.color.brand')}]
-                }).catch(() => {})
+              content: {
+                label: '关于',
+                icon: $r('sys.symbol.info_circle'),
+                action: () => {
+                  this.isShowingAbout = true;
+                }
               }
             }
           ]

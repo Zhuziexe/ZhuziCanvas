@@ -129,12 +129,10 @@ function floodFillTask(
 
   const visited = new Uint8Array(W * H);
 
-  // 80KB 固定栈，绝大多数场景够用
   const STACK_SIZE = W * 16;
   let stack = new Int32Array(STACK_SIZE);
   let sp = 0;
 
-  // 溢出时扩容
   const push = (x: number, y: number): void => {
     if (sp + 2 > stack.length) {
       const bigger = new Int32Array(stack.length * 2);
@@ -244,6 +242,8 @@ export struct EditorPage {
     createdAt: 0, updatedAt: 0
   };
 
+  @StorageProp('windowWidth') windowWidth: number = 0;
+
   @State isPressingTool: boolean = false;
   @State isPressingDoBar: boolean = false;
   @State toolMode: ToolMode = 'brush';
@@ -332,6 +332,10 @@ export struct EditorPage {
     this.undoStack = [];
     this.redoStack = [];
     AppStorage.setOrCreate('projectsRefreshToken', Date.now());
+  }
+
+  private isWideScreen(): boolean {
+    return this.windowWidth >= 600;
   }
 
   private showLoading(message: string): void {
@@ -862,7 +866,6 @@ export struct EditorPage {
       } else if (event.type === TouchType.Move) {
         const dx = x - this.fillDownX;
         const dy = y - this.fillDownY;
-        // 20vp 的容差阈值，转成 px 后再平方比较
         const thresh = vp2px(20);
         if (dx * dx + dy * dy > thresh * thresh) {
           this.fillDownValid = false;
@@ -878,13 +881,11 @@ export struct EditorPage {
       return;
     }
 
-    // 画笔 / 橡皮
     if (event.type === TouchType.Down) {
       this.lastX = x;
       this.lastY = y;
       this.isStroking = true;
       this.curColor = this.color;
-      // 笔宽从 vp 语义转成 px，保证视觉粗细和之前一致
       this.curWidth = vp2px(this.strokeWidth);
       this.curIsEraser = this.toolMode === 'eraser';
       this.brushMinX = x;
@@ -963,7 +964,6 @@ export struct EditorPage {
   }
 
   private toOuterX(canvasX: number): number {
-    // canvasX 是画布 px 坐标，转成 vp 后套公式
     const scale = this.displayScale * this.userScale;
     return this.offsetX + this.outerW / 2 + (px2vp(canvasX) - px2vp(this.project.width) / 2) * scale;
   }
@@ -1059,7 +1059,7 @@ export struct EditorPage {
   }
 
   @Builder
-  ToolBar() {
+  ToolBarBody() {
     Column({ space: 0 }) {
       Stack() {
         Row({ space: 8 }) {
@@ -1184,8 +1184,7 @@ export struct EditorPage {
       }
       .width('100%')
     }
-    .width('90%')
-    .constraintSize({ maxWidth: 420 })
+    .width('100%')
     .borderRadius(30)
     .backgroundColor($r('app.color.immersive_background'))
     .backdropBlur(30)
@@ -1209,39 +1208,84 @@ export struct EditorPage {
   }
 
   @Builder
+  ToolBar() {
+    Column() {
+      this.ToolBarBody()
+    }
+    .width('90%')
+    .constraintSize({ maxWidth: 420 })
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  @Builder
+  DoBarBody() {
+    Row({ space: 0 }) {
+      this.UndoButton()
+      this.RedoButton()
+    }
+    .width(120)
+    .borderRadius(30)
+    .backgroundColor($r('app.color.immersive_background'))
+    .backdropBlur(30)
+    .border({
+      width: 0.5,
+      color: 'rgba(255, 255, 255, 0.6)',
+      radius: 30
+    })
+    .shadow({
+      radius: 30,
+      color: 'rgba(0, 0, 0, 0.15)',
+      offsetX: 0,
+      offsetY: 6
+    })
+    .scale({
+      x: this.isPressingDoBar ? 0.98 : 1.0,
+      y: this.isPressingDoBar ? 0.98 : 1.0
+    })
+    .animation({ curve: curves.springMotion(0.5, 0.8) })
+    .onClick(() => {})
+  }
+
+  @Builder
   DoBar() {
     Row({ space: 0 }) {
       Blank()
         .layoutWeight(1)
         .hitTestBehavior(HitTestMode.None)
-      Row({ space: 0 }) {
-        this.UndoButton()
-        this.RedoButton()
-      }
-      .width(120)
-      .borderRadius(30)
-      .backgroundColor($r('app.color.immersive_background'))
-      .backdropBlur(30)
-      .border({
-        width: 0.5,
-        color: 'rgba(255, 255, 255, 0.6)',
-        radius: 30
-      })
-      .shadow({
-        radius: 30,
-        color: 'rgba(0, 0, 0, 0.15)',
-        offsetX: 0,
-        offsetY: 6
-      })
-      .scale({
-        x: this.isPressingDoBar ? 0.98 : 1.0,
-        y: this.isPressingDoBar ? 0.98 : 1.0
-      })
-      .animation({ curve: curves.springMotion(0.5, 0.8) })
-      .hitTestBehavior(HitTestMode.Default)
+      this.DoBarBody()
     }
     .padding({ left: 16, right: 16 })
     .backgroundColor(Color.Transparent)
+  }
+
+  @Builder
+  BottomBars() {
+    if (this.isWideScreen()) {
+      Row({ space: 12 }) {
+        Column() {
+          this.ToolBarBody()
+        }
+        .width(400)
+
+        Blank()
+          .layoutWeight(1)
+          .hitTestBehavior(HitTestMode.None)
+
+        this.DoBarBody()
+      }
+      .width('100%')
+      .padding({ left: 24, right: 24, bottom: 24 })
+      .alignItems(VerticalAlign.Bottom)
+      .hitTestBehavior(HitTestMode.None)
+    } else {
+      Column({ space: 6 }) {
+        this.DoBar()
+        this.ToolBar()
+      }
+      .width('100%')
+      .padding({ bottom: 8 })
+      .hitTestBehavior(HitTestMode.None)
+    }
   }
 
   build() {
@@ -1319,14 +1363,12 @@ export struct EditorPage {
             this.PickerPreview()
           }
 
-          Column({ space: 6 }) {
+          Column() {
             Blank()
               .layoutWeight(1)
               .hitTestBehavior(HitTestMode.None)
-            this.DoBar();
-            this.ToolBar();
+            this.BottomBars()
           }
-          .padding({ bottom: 8 })
           .width('100%')
           .hitTestBehavior(HitTestMode.None)
         }
@@ -1342,7 +1384,6 @@ export struct EditorPage {
           const availH = Number(newArea.height) - 32;
           if (availW <= 0 || availH <= 0) return;
 
-          // project 尺寸是 px 语义，转成 vp 再和 availW/availH 比
           const canvasVpW = px2vp(this.project.width);
           const canvasVpH = px2vp(this.project.height);
           const s = Math.min(availW / canvasVpW, availH / canvasVpH);
