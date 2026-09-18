@@ -123,8 +123,12 @@ struct Index {
   private toggleView(): void {
     this.viewMode = this.viewMode === 'list' ? 'grid' : 'list';
     preferences.getPreferences(this.context, PREF_NAME).then((pref) => {
-      pref.put(KEY_VIEW_MODE, this.viewMode);
-      pref.flush();
+      try {
+        pref.putSync(KEY_VIEW_MODE, this.viewMode);
+        pref.flushSync();
+      } catch (error) {
+        console.error('写入Preferences失败');
+      }
     }).catch(() => {});
   }
 
