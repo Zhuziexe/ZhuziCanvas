@@ -2,15 +2,19 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "竹子画板"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "竹子画板"
     },
     {
       "name": "EntryAbility_label",
       "value": "竹子画板"
+    },
+    {
+      "name": "reason_prepare_terminate",
+      "value": "用于在您关闭应用时弹出是否保存的确认提示"
     }
   ]
 }

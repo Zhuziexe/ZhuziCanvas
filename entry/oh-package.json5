@@ -1,10 +1,10 @@
 {
   "name": "entry",
   "version": "1.0.2",
-  "description": "Please describe the basic information.",
+  "description": "竹子画板",
   "main": "",
-  "author": "",
-  "license": "",
+  "author": "Zhuziexe",
+  "license": "MIT",
   "dependencies": {}
 }
 

@@ -84,12 +84,10 @@ export class ProjectStore {
     try {
       fileIo.unlinkSync(ProjectStore.getImagePath(id));
     } catch (e) {
-      // 原图可能不存在
     }
     try {
       fileIo.unlinkSync(ProjectStore.getThumbPath(id));
     } catch (e) {
-      // 缩略图可能不存在
     }
   }
 }

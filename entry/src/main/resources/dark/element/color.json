@@ -11,6 +11,10 @@
     {
       "name": "immersive_background",
       "value": "#B3000000"
+    },
+    {
+      "name": "hover_color",
+      "value": "#55555555"
     }
   ]
 }

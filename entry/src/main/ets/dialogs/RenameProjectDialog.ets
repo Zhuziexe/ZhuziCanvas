@@ -25,20 +25,41 @@ export struct RenameProjectDialog {
         .onChange((v: string) => {
           this.name = v;
         })
+        .defaultFocus(true)
+        .onSubmit((enterKey,event)=>{
+          const name = this.name.trim();
+          if (!name) {
+            promptAction.openToast({ message: '请输入项目名称' }).catch(()=>{});
+            return;
+          }
+          if (name === this.currentName) {
+            this.controller?.close();
+            return;
+          }
+          const others = this.existingNames.filter((n: string) => n !== this.currentName);
+          if (others.includes(name)) {
+            promptAction.openToast({ message: '项目名称已存在' }).catch(()=>{});
+            return;
+          }
+          this.onConfirm(name);
+          this.controller?.close();
+        })
 
       Row({ space: 12 }) {
         Button('取消')
           .layoutWeight(1)
           .buttonStyle(ButtonStyleMode.NORMAL)
+          .fontColor($r('app.color.brand'))
           .onClick(() => this.controller?.close())
 
         Button('确定')
           .layoutWeight(1)
           .buttonStyle(ButtonStyleMode.EMPHASIZED)
+          .backgroundColor($r('app.color.brand'))
           .onClick(() => {
             const name = this.name.trim();
             if (!name) {
-              promptAction.showToast({ message: '请输入项目名称' });
+              promptAction.openToast({ message: '请输入项目名称' }).catch(()=>{});
               return;
             }
             if (name === this.currentName) {
@@ -47,7 +68,7 @@ export struct RenameProjectDialog {
             }
             const others = this.existingNames.filter((n: string) => n !== this.currentName);
             if (others.includes(name)) {
-              promptAction.showToast({ message: '项目名称已存在' });
+              promptAction.openToast({ message: '项目名称已存在' }).catch(()=>{});
               return;
             }
             this.onConfirm(name);

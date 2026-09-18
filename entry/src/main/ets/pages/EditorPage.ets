@@ -2,13 +2,19 @@ import { common } from '@kit.AbilityKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { curves, LengthMetricsUnit, promptAction } from '@kit.ArkUI';
+import { curves, LengthMetricsUnit, promptAction, uiMaterial } from '@kit.ArkUI';
 import { taskpool } from '@kit.ArkTS';
 import { ProjectStore, DrawProject } from '../common/ProjectStore';
-import { hdsMaterial, HdsNavDestination } from '@kit.UIDesignKit';
+import { hdsMaterial, HdsNavDestination, HdsNavigationBadgeIconOptions, TextStyleMode } from '@kit.UIDesignKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { PickColorDialog } from '../dialogs/PickColorDialog';
 import { LoadingDialog } from '../dialogs/LoadingDialog';
+import { ResizeCanvasDialog, ResizeMode } from '../dialogs/ResizeCanvasDialog';
+import { ImageOverlayParam } from './ImageOverlayPage';
+import { KeyCode } from '@kit.InputKit';
+import { systemShare } from '@kit.ShareKit';
+import { uniformDataStruct, uniformTypeDescriptor } from '@kit.ArkData';
+import { TextParam } from './TextPage';
 
 type ToolMode = 'brush' | 'eraser' | 'picker' | 'fill' | 'pan';
 
@@ -235,6 +241,106 @@ function floodFillTask(
   return outBuffer;
 }
 
+@Concurrent
+function resizeCanvasTask(
+  oldBuffer: ArrayBuffer,
+  oldW: number,
+  oldH: number,
+  newW: number,
+  newH: number,
+  mode: number,
+  bgR: number,
+  bgG: number,
+  bgB: number
+): ArrayBuffer {
+  const src = new Uint8ClampedArray(oldBuffer);
+  const outBuf = new ArrayBuffer(newW * newH * 4);
+  const out = new Uint8ClampedArray(outBuf);
+
+  for (let i = 0; i < out.length; i += 4) {
+    out[i] = bgR;
+    out[i + 1] = bgG;
+    out[i + 2] = bgB;
+    out[i + 3] = 255;
+  }
+
+  const sample = (sx: number, sy: number, ox: number, oy: number): void => {
+    if (sx < 0 || sy < 0 || sx > oldW - 1 || sy > oldH - 1) return;
+
+    const x0 = Math.floor(sx);
+    const y0 = Math.floor(sy);
+    const x1 = x0 + 1 < oldW ? x0 + 1 : oldW - 1;
+    const y1 = y0 + 1 < oldH ? y0 + 1 : oldH - 1;
+    const fx = sx - x0;
+    const fy = sy - y0;
+
+    const i00 = (y0 * oldW + x0) * 4;
+    const i10 = (y0 * oldW + x1) * 4;
+    const i01 = (y1 * oldW + x0) * 4;
+    const i11 = (y1 * oldW + x1) * 4;
+
+    const w00 = (1 - fx) * (1 - fy);
+    const w10 = fx * (1 - fy);
+    const w01 = (1 - fx) * fy;
+    const w11 = fx * fy;
+
+    const oi = (oy * newW + ox) * 4;
+    for (let c = 0; c < 4; c++) {
+      out[oi + c] =
+        src[i00 + c] * w00 + src[i10 + c] * w10 +
+          src[i01 + c] * w01 + src[i11 + c] * w11;
+    }
+  };
+
+  if (mode === 0) {
+    // 拉伸
+    for (let y = 0; y < newH; y++) {
+      const sy = (y + 0.5) * oldH / newH - 0.5;
+      for (let x = 0; x < newW; x++) {
+        const sx = (x + 0.5) * oldW / newW - 0.5;
+        sample(sx, sy, x, y);
+      }
+    }
+  } else if (mode === 1) {
+    // 等比缩放 + 居中，留白
+    const scale = Math.min(newW / oldW, newH / oldH);
+    const drawW = Math.round(oldW * scale);
+    const drawH = Math.round(oldH * scale);
+    const offX = Math.floor((newW - drawW) / 2);
+    const offY = Math.floor((newH - drawH) / 2);
+    for (let dy = 0; dy < drawH; dy++) {
+      const sy = (dy + 0.5) / scale - 0.5;
+      for (let dx = 0; dx < drawW; dx++) {
+        const sx = (dx + 0.5) / scale - 0.5;
+        sample(sx, sy, offX + dx, offY + dy);
+      }
+    }
+  } else if (mode === 2) {
+    // 居中裁切
+    const scale = Math.max(newW / oldW, newH / oldH);
+    const offX = (newW - oldW * scale) / 2;
+    const offY = (newH - oldH * scale) / 2;
+    for (let y = 0; y < newH; y++) {
+      const sy = (y - offY + 0.5) / scale - 0.5;
+      for (let x = 0; x < newW; x++) {
+        const sx = (x - offX + 0.5) / scale - 0.5;
+        sample(sx, sy, x, y);
+      }
+    }
+  } else {
+    // 左上角对齐，不缩放
+    const copyW = Math.min(oldW, newW);
+    const copyH = Math.min(oldH, newH);
+    for (let y = 0; y < copyH; y++) {
+      const srcOff = y * oldW * 4;
+      const dstOff = y * newW * 4;
+      out.set(src.subarray(srcOff, srcOff + copyW * 4), dstOff);
+    }
+  }
+
+  return outBuf;
+}
+
 @Component
 export struct EditorPage {
   @Prop project: DrawProject = {
@@ -243,6 +349,11 @@ export struct EditorPage {
   };
 
   @StorageProp('windowWidth') windowWidth: number = 0;
+  @StorageLink('projectsRefreshToken') @Watch('onProjectsChanged')
+  projectsRefreshToken: number = 0;
+
+  @StorageLink('saveAndExitToken') @Watch('onSaveAndExitRequested')
+  saveAndExitToken: number = 0;
 
   @State isPressingTool: boolean = false;
   @State isPressingDoBar: boolean = false;
@@ -254,12 +365,21 @@ export struct EditorPage {
   @State fillTol: number = 32;
   @State color: string = '#000000';
   @State isPinching: boolean = false;
-  @State isDirty: boolean = false;
+  @State @Watch('syncDirtyToStorage') isDirty: boolean = false;
   @State isFilling: boolean = false;
   @State canUndo: boolean = false;
   @State canRedo: boolean = false;
   @State isBusy: boolean = false;
-
+  @State hoverStates: Record<string, boolean> = {
+    'brush': false,
+    'eraser': false,
+    'fill': false,
+    'picker': false,
+    'pan': false,
+    'color': false,
+    'undo': false,
+    'redo': false
+  };
   @State pickerX: number = 0;
   @State pickerY: number = 0;
   @State showPickerPreview: boolean = false;
@@ -269,6 +389,11 @@ export struct EditorPage {
 
   @State offsetX: number = 0;
   @State offsetY: number = 0;
+
+  @State canvasW: number = 0;
+  @State canvasH: number = 0;
+
+  @State isDragHover: boolean = false;
 
   private masterBuffer: ArrayBuffer | null = null;
   private masterReady: boolean = false;
@@ -289,6 +414,8 @@ export struct EditorPage {
   private panStartY: number = 0;
   private isPanning: boolean = false;
 
+  private mouseLeftDown: boolean = false;
+
   private pathStack: NavPathStack = new NavPathStack();
   private context = this.getUIContext().getHostContext() as common.UIAbilityContext;
   private setting: RenderingContextSettings = new RenderingContextSettings(false);
@@ -307,9 +434,13 @@ export struct EditorPage {
 
   private colorDialogController: CustomDialogController | null = null;
   private loadingDialogController: CustomDialogController | null = null;
+  private resizeCanvasController:CustomDialogController | null = null;
   private isImageLoaded: boolean = false;
 
   aboutToAppear(): void {
+    this.canvasW = this.project.width;
+    this.canvasH = this.project.height;
+
     this.colorDialogController = new CustomDialogController({
       builder: PickColorDialog({
         currentColor: this.color,
@@ -320,6 +451,18 @@ export struct EditorPage {
       autoCancel: true,
       alignment: DialogAlignment.Bottom
     });
+
+    this.resizeCanvasController = new CustomDialogController({
+      builder: ResizeCanvasDialog({
+        currentWidth: this.canvasW,
+        currentHeight: this.canvasH,
+        onConfirm: (w: number, h: number, mode: ResizeMode) => {
+          this.resizeCanvas(w, h, mode);
+        }
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center
+    })
   }
 
   aboutToDisappear(): void {
@@ -332,10 +475,283 @@ export struct EditorPage {
     this.undoStack = [];
     this.redoStack = [];
     AppStorage.setOrCreate('projectsRefreshToken', Date.now());
+
+    AppStorage.setOrCreate('editorDirty', false);
+  }
+
+  private syncDirtyToStorage(): void {
+    AppStorage.setOrCreate('editorDirty', this.isDirty);
+  }
+
+  private buildMenuItems():Array<HdsNavigationBadgeIconOptions>{
+    const items:Array<HdsNavigationBadgeIconOptions> = [{
+      content: {
+        label: this.isDirty ? '保存' : '已保存',
+        icon: $r('sys.symbol.save'),
+        action: async () => {
+          const ok = await this.saveToSandbox();
+          promptAction.openToast({ message: ok ? '已保存' : '保存失败' }).catch(() => {});
+        },
+        type: TextStyleMode.NORMAL
+      }
+    },
+    {
+      content: {
+        label: '保存到相册',
+        icon: $r('sys.symbol.picture_badge_arrow_down'),
+        action: () => this.saveToGallery()
+      }
+    },
+    {
+      content: {
+        label: '分享',
+        icon: $r('sys.symbol.share'),
+        action: () => this.shareImage()
+      }
+    },
+    {
+      content: {
+        label: '调整画布尺寸',
+        icon: $r('sys.symbol.crop'),
+        action: () => this.showResizeDialog()
+      }
+    },
+    {
+      content: {
+        label: '清空画板',
+        icon: $r('sys.symbol.trash'),
+        action: () => this.clearCanvas()
+      }
+    },
+    {
+      content: {
+        label: '添加文字',
+        icon: $r('sys.symbol.text_character_square'),
+        action: async () => {
+          if (this.isDirty) {
+            const ok = await this.saveToSandbox();
+            if (!ok) {
+              promptAction.openToast({ message: '无法保存' }).catch(() => {});
+              return;
+            }
+          }
+          const currentProject: DrawProject = {
+            id: this.project.id,
+            name: this.project.name,
+            width: this.canvasW,
+            height: this.canvasH,
+            createdAt: this.project.createdAt,
+            updatedAt: this.project.updatedAt
+          };
+          this.pathStack.pushPathByName('TextPage', {
+            project: currentProject
+          } as TextParam);
+        }
+      }
+    },
+    {
+      content: {
+        label: '叠加图片到画板',
+        icon: $r('sys.symbol.picture_on_square'),
+        action: () => this.startImageOverlay()
+      }
+    }];
+    if(deviceInfo.deviceType == deviceInfo.DeviceTypes.TYPE_2IN1){
+      items.push({
+        content:{
+          label:'快捷键使用说明',
+          icon:$r('sys.symbol.keyboard'),
+          action:()=>{
+            this.getUIContext().showAlertDialog({
+              title:'快捷键使用说明',
+              message:'工具切换\n' +
+              'B 画笔   E 橡皮\n' +
+              'F 填充   I 取色   H 拖动\n\n' +
+              '编辑\n' +
+              'Ctrl Z 撤销 Ctrl Y 重做\n\n' +
+              '视图\n' +
+              'Ctrl + 放大\n' +
+              'Ctrl - 缩小\n' +
+              'Ctrl 0 重置缩放',
+              confirm:{
+                value:'知道了',
+                fontColor:$r('app.color.brand'),
+                action:()=>{}
+              }
+            })
+          }
+        }
+      });
+    }
+    return items;
+  }
+
+  private async onSaveAndExitRequested(): Promise<void> {
+    if (this.saveAndExitToken === 0) return;
+    const token = this.saveAndExitToken;
+
+    try {
+      await this.ensureMasterReady();
+
+      let ok = true;
+      if (this.isDirty) {
+        ok = await this.doSaveToSandbox();
+      }
+
+      AppStorage.setOrCreate('saveAndExitResult', ok);
+      AppStorage.setOrCreate('saveAndExitResultToken', token);
+    } catch (e) {
+      console.error('保存并退出失败:', e);
+      AppStorage.setOrCreate('saveAndExitResult', false);
+      AppStorage.setOrCreate('saveAndExitResultToken', token);
+    }
+  }
+
+  onProjectsChanged(): void {
+    if (!this.isImageLoaded) return;
+    this.reloadFromDisk();
+  }
+
+  private async reloadFromDisk(): Promise<void> {
+    this.isImageLoaded = false;
+    this.masterReady = false;
+    this.masterBuffer = null;
+    this.undoStack = [];
+    this.redoStack = [];
+    this.canUndo = false;
+    this.canRedo = false;
+    this.isDirty = false;
+    await this.loadExistingImage();
   }
 
   private isWideScreen(): boolean {
     return this.windowWidth >= 600;
+  }
+
+  private extractImageUris(event: DragEvent): string[] {
+    const uris: string[] = [];
+    try {
+      const dragData = event.getData();
+      if (!dragData) return uris;
+
+      const records = dragData.getRecords();
+      if (!records || records.length === 0) return uris;
+
+      for (const record of records) {
+        const types = record.getTypes();
+        if (!types || !types.includes(uniformTypeDescriptor.UniformDataType.FILE_URI)) continue;
+
+        const fileUriData = record.getEntry(
+          uniformTypeDescriptor.UniformDataType.FILE_URI
+        ) as uniformDataStruct.FileUri;
+
+        if (!fileUriData?.oriUri) continue;
+
+        const td = uniformTypeDescriptor.getTypeDescriptor(fileUriData.fileType);
+        const isImage = td
+          ? td.belongsTo(uniformTypeDescriptor.UniformDataType.IMAGE)
+          : /\.(png|jpe?g|webp|bmp|gif|heic|heif)$/i.test(fileUriData.oriUri);
+
+        if (isImage) {
+          uris.push(fileUriData.oriUri);
+        }
+      }
+    } catch (e) {
+      console.error('解析拖放数据失败:', e);
+    }
+    return uris;
+  }
+
+  private async startImageOverlay(): Promise<void> {
+    try {
+      if (this.isDirty) {
+        const ok = await this.saveToSandbox();
+        if (!ok) {
+          promptAction.openToast({ message: '无法保存' }).catch(() => {});
+          return;
+        }
+      }
+
+      const opt = new photoAccessHelper.PhotoSelectOptions();
+      opt.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
+      opt.maxSelectNumber = 1;
+      const picker = new photoAccessHelper.PhotoViewPicker();
+      const result = await picker.select(opt);
+
+      if (!result || !result.photoUris || result.photoUris.length === 0) return;
+
+      this.openOverlayPage(result.photoUris[0]);
+    } catch (e) {
+      console.error('叠加图片失败:', e);
+      promptAction.openToast({ message: '操作失败' }).catch(() => {});
+    }
+  }
+
+  private openOverlayPage(overlayUri: string): void {
+    const currentProject: DrawProject = {
+      id: this.project.id,
+      name: this.project.name,
+      width: this.canvasW,
+      height: this.canvasH,
+      createdAt: this.project.createdAt,
+      updatedAt: this.project.updatedAt
+    };
+    this.pathStack.pushPathByName('ImageOverlayPage', {
+      project: currentProject,
+      overlayUri: overlayUri
+    } as ImageOverlayParam);
+  }
+
+  private async handleImageDrop(event: DragEvent): Promise<void> {
+    const uris = this.extractImageUris(event);
+    if (uris.length === 0) {
+      promptAction.openToast({ message: '只能拖入图片文件' }).catch(() => {});
+      return;
+    }
+
+    if (this.isDirty) {
+      const ok = await this.saveToSandbox();
+      if (!ok) {
+        promptAction.openToast({ message: '无法保存当前画板' }).catch(() => {});
+        return;
+      }
+    }
+
+    this.openOverlayPage(uris[0]);
+  }
+
+  async shareImage(): Promise<void> {
+    if (this.isDirty) {
+      const ok = await this.saveToSandbox();
+      if (!ok) {
+        promptAction.openToast({ message: '无法保存' }).catch(() => {
+        });
+        return;
+      }
+    }
+
+    try {
+      const sandboxPath = ProjectStore.getImagePath(this.project.id);
+
+      const uri = fileUri.getUriFromPath(sandboxPath);
+
+      const shareData = new systemShare.SharedData({
+        utd: uniformTypeDescriptor.UniformDataType.PNG,
+        uri: uri,
+        title: this.project.name,
+        description: `${this.project.name} - 由竹子画板创作`
+      });
+
+      const controller = new systemShare.ShareController(shareData);
+
+      await controller.show(this.context, {
+        previewMode: systemShare.SharePreviewMode.DETAIL,
+        selectionMode: systemShare.SelectionMode.SINGLE
+      });
+    } catch (e) {
+      console.error('分享失败:', e);
+      promptAction.openToast({ message: '分享失败' }).catch(() => {});
+    }
   }
 
   private showLoading(message: string): void {
@@ -380,13 +796,54 @@ export struct EditorPage {
 
   private clampOffset(): void {
     const scale = this.displayScale * this.userScale;
-    const cw = px2vp(this.project.width) * scale;
-    const ch = px2vp(this.project.height) * scale;
+    const cw = px2vp(this.canvasW) * scale;
+    const ch = px2vp(this.canvasH) * scale;
     const margin = 80;
     const maxX = Math.max(0, (cw + this.outerW) / 2 - margin);
     const maxY = Math.max(0, (ch + this.outerH) / 2 - margin);
     this.offsetX = Math.max(-maxX, Math.min(maxX, this.offsetX));
     this.offsetY = Math.max(-maxY, Math.min(maxY, this.offsetY));
+  }
+
+  private zoomAt(xVp: number, yVp: number, factor: number): void {
+    const oldScale = this.userScale;
+    const newScale = this.clampScale(oldScale * factor);
+    if (newScale === oldScale) return;
+
+    const mx = xVp - this.outerW / 2;
+    const my = yVp - this.outerH / 2;
+    const r = newScale / oldScale;
+
+    this.offsetX = mx * (1 - r) + this.offsetX * r;
+    this.offsetY = my * (1 - r) + this.offsetY * r;
+
+    this.userScale = newScale;
+    this.pinchBase = newScale;
+    this.clampOffset();
+  }
+
+  private resetZoom(): void {
+    this.userScale = 1;
+    this.pinchBase = 1;
+    this.offsetX = 0;
+    this.offsetY = 0;
+  }
+
+  private onCanvasAxis(event: AxisEvent): void {
+    if (this.isFilling || this.isBusy) return;
+
+    if (event.hasAxis(AxisType.PINCH_AXIS)) {
+      const pinch = event.getPinchAxisScaleValue();
+      if (pinch > 0) {
+        this.zoomAt(event.x, event.y, pinch);
+        return;
+      }
+    }
+
+    const v = event.getVerticalAxisValue();
+    if (v === 0) return;
+    const factor = v > 0 ? 1.1 : 0.9;
+    this.zoomAt(event.x, event.y, factor);
   }
 
   private readCanvasRegion(
@@ -404,8 +861,8 @@ export struct EditorPage {
   private async renderMasterToCanvas(): Promise<boolean> {
     if (!this.masterBuffer) return false;
     try {
-      const W = this.project.width;
-      const H = this.project.height;
+      const W = this.canvasW;
+      const H = this.canvasH;
 
       const rgba = new Uint8ClampedArray(this.masterBuffer);
       const bgra = new Uint8ClampedArray(rgba.length);
@@ -444,7 +901,7 @@ export struct EditorPage {
     newPixels: Uint8ClampedArray
   ): void {
     if (!this.masterBuffer) return;
-    const W = this.project.width;
+    const W = this.canvasW;
     const master = new Uint8ClampedArray(this.masterBuffer);
 
     for (let row = 0; row < lh; row++) {
@@ -477,7 +934,7 @@ export struct EditorPage {
     lx: number, ly: number, lw: number, lh: number,
     pixels: Uint8ClampedArray
   ): void {
-    const W = this.project.width;
+    const W = this.canvasW;
     for (let row = 0; row < lh; row++) {
       const dstOff = ((ly + row) * W + lx) * 4;
       const srcOff = row * lw * 4;
@@ -558,8 +1015,8 @@ export struct EditorPage {
     await new Promise<void>((resolve) => setTimeout(() => resolve(), 60));
 
     try {
-      const W = this.project.width;
-      const H = this.project.height;
+      const W = this.canvasW;
+      const H = this.canvasH;
 
       const oldPixels = new Uint8ClampedArray(new Uint8ClampedArray(this.masterBuffer));
 
@@ -590,7 +1047,7 @@ export struct EditorPage {
       this.isDirty = true;
     } catch (e) {
       console.error('填充失败:', e);
-      promptAction.openToast({ message: '填充失败' }).catch(()=>{});
+      promptAction.openToast({ message: '填充失败' }).catch(() => {});
     } finally {
       this.hideLoading();
       this.isFilling = false;
@@ -598,15 +1055,84 @@ export struct EditorPage {
     }
   }
 
+  private async resizeCanvas(newW: number, newH: number, mode: ResizeMode): Promise<void> {
+    if (this.isBusy || !this.masterBuffer) return;
+    if (newW === this.canvasW && newH === this.canvasH) {
+      promptAction.openToast({ message: '尺寸未变化' }).catch(() => {});
+      return;
+    }
+
+    this.isBusy = true;
+    this.showLoading('正在调整画布...');
+    await new Promise<void>(r => setTimeout(r, 60));
+
+    try {
+      const oldW = this.canvasW;
+      const oldH = this.canvasH;
+
+      const copyBuffer = new ArrayBuffer(this.masterBuffer.byteLength);
+      new Uint8ClampedArray(copyBuffer).set(new Uint8ClampedArray(this.masterBuffer));
+
+      const modeNum =
+        mode === 'stretch' ? 0 :
+          mode === 'contain' ? 1 :
+            mode === 'cover' ? 2 : 3;
+
+      const task = new taskpool.Task(
+        resizeCanvasTask,
+        copyBuffer, oldW, oldH, newW, newH, modeNum, 255, 255, 255
+      );
+      task.setTransferList([copyBuffer]);
+
+      const resultBuffer = await taskpool.execute(task) as ArrayBuffer;
+
+      this.canvasW = newW;
+      this.canvasH = newH;
+      this.masterBuffer = resultBuffer;
+
+      this.undoStack = [];
+      this.redoStack = [];
+      this.canUndo = false;
+      this.canRedo = false;
+
+      const updated: DrawProject = {
+        id: this.project.id,
+        name: this.project.name,
+        width: newW,
+        height: newH,
+        createdAt: this.project.createdAt,
+        updatedAt: Date.now()
+      };
+      await ProjectStore.upsert(updated);
+
+      await new Promise<void>(r => setTimeout(r, 80));
+      this.resetZoom();
+      await this.renderMasterToCanvas();
+
+      this.isDirty = true;
+      promptAction.openToast({ message: '画布已调整' }).catch(() => {});
+    } catch (e) {
+      console.error('调整画布失败:', e);
+      promptAction.openToast({ message: '调整失败' }).catch(() => {});
+    } finally {
+      this.hideLoading();
+      this.isBusy = false;
+    }
+  }
+
+  private showResizeDialog(): void {
+    this.resizeCanvasController?.open();
+  }
+
   private pickColorAt(x: number, y: number): void {
     try {
       const ix = Math.floor(x);
       const iy = Math.floor(y);
-      if (ix < 0 || iy < 0 || ix >= this.project.width || iy >= this.project.height) {
+      if (ix < 0 || iy < 0 || ix >= this.canvasW || iy >= this.canvasH) {
         return;
       }
       if (!this.masterBuffer) return;
-      const W = this.project.width;
+      const W = this.canvasW;
       const master = new Uint8ClampedArray(this.masterBuffer);
       const off = (iy * W + ix) * 4;
       const a = master[off + 3];
@@ -623,9 +1149,10 @@ export struct EditorPage {
   private async doSaveToSandbox(): Promise<boolean> {
     try {
       if (!this.masterBuffer) return false;
-      const W = this.project.width;
-      const H = this.project.height;
-      const pixels = new Uint8ClampedArray(this.masterBuffer);
+      const W = this.canvasW;
+      const H = this.canvasH;
+
+      const pixels = new Uint8ClampedArray(this.masterBuffer).slice();
 
       const path: string = ProjectStore.getImagePath(this.project.id);
       const thumbPath: string = ProjectStore.getThumbPath(this.project.id);
@@ -636,8 +1163,8 @@ export struct EditorPage {
         const updated: DrawProject = {
           id: this.project.id,
           name: this.project.name,
-          width: this.project.width,
-          height: this.project.height,
+          width: this.canvasW,
+          height: this.canvasH,
           createdAt: this.project.createdAt,
           updatedAt: Date.now()
         };
@@ -665,7 +1192,7 @@ export struct EditorPage {
   async saveToGallery(): Promise<void> {
     const ok = await this.saveToSandbox();
     if (!ok) {
-      promptAction.openToast({ message: '保存到沙箱失败' }).catch(()=>{});
+      promptAction.openToast({ message: '保存到沙箱失败' }).catch(() => {});
       return;
     }
 
@@ -702,17 +1229,17 @@ export struct EditorPage {
         if (dstFile) { try { fileIo.closeSync(dstFile); } catch {} }
       }
 
-      promptAction.openToast({ message: '已保存到相册' }).catch(()=>{});
+      promptAction.openToast({ message: '已保存到相册' }).catch(() => {});
     } catch (e) {
       console.error('保存到相册失败:', e);
-      promptAction.openToast({ message: '保存到相册失败' }).catch(()=>{});
+      promptAction.openToast({ message: '保存到相册失败' }).catch(() => {});
     }
   }
 
   private async ensureMasterReady(): Promise<void> {
     if (this.masterReady) return;
-    const W = this.project.width;
-    const H = this.project.height;
+    const W = this.canvasW;
+    const H = this.canvasH;
     const region = this.readCanvasRegion(0, 0, W, H);
     if (region) {
       this.masterBuffer = region.buffer as ArrayBuffer;
@@ -723,8 +1250,8 @@ export struct EditorPage {
   async loadExistingImage(): Promise<void> {
     if (this.isImageLoaded) return;
     const path = ProjectStore.getImagePath(this.project.id);
-    const W = this.project.width;
-    const H = this.project.height;
+    const W = this.canvasW;
+    const H = this.canvasH;
 
     try {
       if (!fileIo.accessSync(path)) {
@@ -759,8 +1286,9 @@ export struct EditorPage {
         this.canvasCtx.fillRect(0, 0, W, H);
         this.canvasCtx.drawImage(pixelMap, 0, 0, W, H);
 
+        const imgData: ImageData = this.canvasCtx.getImageData(0, 0, W, H);
         const buf = new ArrayBuffer(W * H * 4);
-        await pixelMap.readPixelsToBuffer(buf);
+        new Uint8ClampedArray(buf).set(imgData.data);
 
         this.masterBuffer = buf;
         this.masterReady = true;
@@ -801,7 +1329,166 @@ export struct EditorPage {
     this.canvasCtx.restore();
   }
 
+  private onPointerDown(xVp: number, yVp: number): void {
+    if (this.isFilling || this.isBusy) return;
+
+    if (this.toolMode === 'pan') {
+      this.panStartX = xVp;
+      this.panStartY = yVp;
+      this.panBaseX = this.offsetX;
+      this.panBaseY = this.offsetY;
+      this.isPanning = true;
+      return;
+    }
+
+    const x = vp2px(xVp);
+    const y = vp2px(yVp);
+
+    if (this.toolMode === 'picker') {
+      if (this.pickerHideTimer !== -1) {
+        clearTimeout(this.pickerHideTimer);
+        this.pickerHideTimer = -1;
+      }
+      this.pickerX = x;
+      this.pickerY = y;
+      this.showPickerPreview = true;
+      this.pickColorAt(x, y);
+      return;
+    }
+
+    if (this.toolMode === 'fill') {
+      this.fillDownX = x;
+      this.fillDownY = y;
+      this.fillDownValid = true;
+      return;
+    }
+
+    this.lastX = x;
+    this.lastY = y;
+    this.isStroking = true;
+    this.curColor = this.color;
+    this.curWidth = vp2px(this.strokeWidth);
+    this.curIsEraser = this.toolMode === 'eraser';
+    this.brushMinX = x;
+    this.brushMinY = y;
+    this.brushMaxX = x;
+    this.brushMaxY = y;
+  }
+
+  private onPointerMove(xVp: number, yVp: number): void {
+    if (this.isFilling || this.isBusy) return;
+
+    if (this.toolMode === 'pan') {
+      if (!this.isPanning) return;
+      const scale = this.displayScale * this.userScale;
+      this.offsetX = this.panBaseX + (xVp - this.panStartX) * scale;
+      this.offsetY = this.panBaseY + (yVp - this.panStartY) * scale;
+      this.clampOffset();
+      return;
+    }
+
+    const x = vp2px(xVp);
+    const y = vp2px(yVp);
+
+    if (this.toolMode === 'picker') {
+      this.pickerX = x;
+      this.pickerY = y;
+      this.pickColorAt(x, y);
+      return;
+    }
+
+    if (this.toolMode === 'fill') {
+      if (!this.fillDownValid) return;
+      const dx = x - this.fillDownX;
+      const dy = y - this.fillDownY;
+      const thresh = vp2px(20);
+      if (dx * dx + dy * dy > thresh * thresh) {
+        this.fillDownValid = false;
+      }
+      return;
+    }
+
+    if (!this.isStroking) return;
+
+    this.drawSegment(this.lastX, this.lastY, x, y);
+    this.lastX = x;
+    this.lastY = y;
+    this.isDirty = true;
+    if (x < this.brushMinX) this.brushMinX = x;
+    if (y < this.brushMinY) this.brushMinY = y;
+    if (x > this.brushMaxX) this.brushMaxX = x;
+    if (y > this.brushMaxY) this.brushMaxY = y;
+  }
+
+  private onPointerUp(xVp: number, yVp: number): void {
+    if (this.isFilling || this.isBusy) return;
+
+    if (this.toolMode === 'pan') {
+      this.isPanning = false;
+      return;
+    }
+
+    const x = vp2px(xVp);
+    const y = vp2px(yVp);
+
+    if (this.toolMode === 'picker') {
+      this.pickerX = x;
+      this.pickerY = y;
+      this.pickerHideTimer = setTimeout(() => {
+        this.showPickerPreview = false;
+        this.pickerHideTimer = -1;
+      }, 700);
+      return;
+    }
+
+    if (this.toolMode === 'fill') {
+      if (this.fillDownValid) {
+        this.performFill(this.fillDownX, this.fillDownY);
+      }
+      this.fillDownValid = false;
+      return;
+    }
+
+    if (!this.isStroking) return;
+    this.isStroking = false;
+    if (!this.masterBuffer) return;
+
+    const r = this.curWidth / 2 + 2;
+    const lx = Math.max(0, Math.floor(this.brushMinX - r));
+    const ly = Math.max(0, Math.floor(this.brushMinY - r));
+    const lw = Math.min(this.canvasW - lx,
+      Math.ceil(this.brushMaxX - this.brushMinX + r * 2));
+    const lh = Math.min(this.canvasH - ly,
+      Math.ceil(this.brushMaxY - this.brushMinY + r * 2));
+    if (lw <= 0 || lh <= 0) return;
+
+    const newPixels = this.readCanvasRegion(lx, ly, lw, lh);
+    if (!newPixels) return;
+
+    const W = this.canvasW;
+    const master = new Uint8ClampedArray(this.masterBuffer);
+    const oldPixels = new Uint8ClampedArray(lw * lh * 4);
+    for (let row = 0; row < lh; row++) {
+      const srcOff = ((ly + row) * W + lx) * 4;
+      const dstOff = row * lw * 4;
+      oldPixels.set(master.subarray(srcOff, srcOff + lw * 4), dstOff);
+    }
+
+    this.commitPatch(lx, ly, lw, lh, oldPixels, newPixels);
+  }
+
+  private onPointerCancel(): void {
+    this.isStroking = false;
+    this.isPanning = false;
+    this.fillDownValid = false;
+    this.showPickerPreview = false;
+  }
+
   private onCanvasTouch(event: TouchEvent): void {
+    if (!event.touches || event.touches.length === 0) {
+      this.fillDownValid = false;
+      return;
+    }
     if (this.isPinching || event.touches.length > 1) {
       this.fillDownValid = false;
       return;
@@ -811,140 +1498,48 @@ export struct EditorPage {
     const touch = event.touches[0];
     if (touch.id !== 0) return;
 
-    if (this.toolMode === 'pan') {
-      if (event.touches.length !== 1) return;
-      const px = touch.x;
-      const py = touch.y;
-      if (event.type === TouchType.Down) {
-        this.panStartX = px;
-        this.panStartY = py;
-        this.panBaseX = this.offsetX;
-        this.panBaseY = this.offsetY;
-        this.isPanning = true;
-      } else if (event.type === TouchType.Move && this.isPanning) {
-        const scale = this.displayScale * this.userScale;
-        this.offsetX = this.panBaseX + (px - this.panStartX) * scale;
-        this.offsetY = this.panBaseY + (py - this.panStartY) * scale;
-        this.clampOffset();
-      } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
-        this.isPanning = false;
-      }
-      return;
-    }
-
-    const x = vp2px(touch.x);
-    const y = vp2px(touch.y);
-
-    if (this.toolMode === 'picker') {
-      if (event.type === TouchType.Down) {
-        if (this.pickerHideTimer !== -1) {
-          clearTimeout(this.pickerHideTimer);
-          this.pickerHideTimer = -1;
-        }
-        this.pickerX = x;
-        this.pickerY = y;
-        this.showPickerPreview = true;
-        this.pickColorAt(x, y);
-      } else if (event.type === TouchType.Move) {
-        this.pickerX = x;
-        this.pickerY = y;
-        this.pickColorAt(x, y);
-      } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
-        this.pickerHideTimer = setTimeout(() => {
-          this.showPickerPreview = false;
-          this.pickerHideTimer = -1;
-        }, 700);
-      }
-      return;
-    }
-
-    if (this.toolMode === 'fill') {
-      if (event.type === TouchType.Down) {
-        this.fillDownX = x;
-        this.fillDownY = y;
-        this.fillDownValid = true;
-      } else if (event.type === TouchType.Move) {
-        const dx = x - this.fillDownX;
-        const dy = y - this.fillDownY;
-        const thresh = vp2px(20);
-        if (dx * dx + dy * dy > thresh * thresh) {
-          this.fillDownValid = false;
-        }
-      } else if (event.type === TouchType.Up) {
-        if (this.fillDownValid) {
-          this.performFill(this.fillDownX, this.fillDownY);
-        }
-        this.fillDownValid = false;
-      } else if (event.type === TouchType.Cancel) {
-        this.fillDownValid = false;
-      }
-      return;
-    }
-
     if (event.type === TouchType.Down) {
-      this.lastX = x;
-      this.lastY = y;
-      this.isStroking = true;
-      this.curColor = this.color;
-      this.curWidth = vp2px(this.strokeWidth);
-      this.curIsEraser = this.toolMode === 'eraser';
-      this.brushMinX = x;
-      this.brushMinY = y;
-      this.brushMaxX = x;
-      this.brushMaxY = y;
-    } else if (event.type === TouchType.Move && this.isStroking) {
-      this.drawSegment(this.lastX, this.lastY, x, y);
-      this.lastX = x;
-      this.lastY = y;
-      this.isDirty = true;
-      if (x < this.brushMinX) this.brushMinX = x;
-      if (y < this.brushMinY) this.brushMinY = y;
-      if (x > this.brushMaxX) this.brushMaxX = x;
-      if (y > this.brushMaxY) this.brushMaxY = y;
+      this.onPointerDown(touch.x, touch.y);
+    } else if (event.type === TouchType.Move) {
+      this.onPointerMove(touch.x, touch.y);
     } else if (event.type === TouchType.Up) {
-      if (!this.isStroking) return;
-      this.isStroking = false;
-      if (!this.masterBuffer) return;
+      this.onPointerUp(touch.x, touch.y);
+    } else if (event.type === TouchType.Cancel) {
+      this.onPointerCancel();
+    }
+  }
 
-      const r = this.curWidth / 2 + 2;
-      let lx = Math.max(0, Math.floor(this.brushMinX - r));
-      let ly = Math.max(0, Math.floor(this.brushMinY - r));
-      let lw = Math.min(this.project.width - lx,
-        Math.ceil(this.brushMaxX - this.brushMinX + r * 2));
-      let lh = Math.min(this.project.height - ly,
-        Math.ceil(this.brushMaxY - this.brushMinY + r * 2));
-      if (lw <= 0 || lh <= 0) return;
+  private onCanvasMouse(event: MouseEvent): void {
+    const action = event.action;
 
-      const newPixels = this.readCanvasRegion(lx, ly, lw, lh);
-      if (!newPixels) return;
-
-      const W = this.project.width;
-      const master = new Uint8ClampedArray(this.masterBuffer);
-      const oldPixels = new Uint8ClampedArray(lw * lh * 4);
-      for (let row = 0; row < lh; row++) {
-        const srcOff = ((ly + row) * W + lx) * 4;
-        const dstOff = row * lw * 4;
-        oldPixels.set(master.subarray(srcOff, srcOff + lw * 4), dstOff);
-      }
-
-      this.commitPatch(lx, ly, lw, lh, oldPixels, newPixels);
+    if (action === MouseAction.Press) {
+      if (event.button !== MouseButton.Left) return;
+      this.mouseLeftDown = true;
+      this.onPointerDown(event.x, event.y);
+    } else if (action === MouseAction.Move) {
+      if (!this.mouseLeftDown) return;
+      this.onPointerMove(event.x, event.y);
+    } else if (action === MouseAction.Release) {
+      if (!this.mouseLeftDown) return;
+      this.mouseLeftDown = false;
+      this.onPointerUp(event.x, event.y);
     }
   }
 
   private clearCanvas(): void {
-    AlertDialog.show({
+    this.getUIContext().showAlertDialog({
       title: '确认清空',
       message: '确定要清空画布吗？',
       buttons: [
-        { value: '取消', action: () => {} },
+        { value: '取消', action: () => {}, fontColor:$r('app.color.brand') },
         {
           value: '清空',
           fontColor: $r('sys.color.warning'),
           action: async () => {
             await this.ensureMasterReady();
             if (!this.masterBuffer) return;
-            const W = this.project.width;
-            const H = this.project.height;
+            const W = this.canvasW;
+            const H = this.canvasH;
 
             const oldPixels = new Uint8ClampedArray(new Uint8ClampedArray(this.masterBuffer));
             const master = new Uint8ClampedArray(this.masterBuffer);
@@ -956,7 +1551,7 @@ export struct EditorPage {
             await this.renderMasterToCanvas();
             this.commitPatch(0, 0, W, H, oldPixels, newPixels);
             this.isDirty = true;
-            promptAction.openToast({ message: '已清空' }).catch(()=>{});
+            promptAction.openToast({ message: '已清空' }).catch(() => {});
           }
         }
       ]
@@ -965,12 +1560,30 @@ export struct EditorPage {
 
   private toOuterX(canvasX: number): number {
     const scale = this.displayScale * this.userScale;
-    return this.offsetX + this.outerW / 2 + (px2vp(canvasX) - px2vp(this.project.width) / 2) * scale;
+    return this.offsetX + this.outerW / 2 + (px2vp(canvasX) - px2vp(this.canvasW) / 2) * scale;
   }
 
   private toOuterY(canvasY: number): number {
     const scale = this.displayScale * this.userScale;
-    return this.offsetY + this.outerH / 2 + (px2vp(canvasY) - px2vp(this.project.height) / 2) * scale;
+    return this.offsetY + this.outerH / 2 + (px2vp(canvasY) - px2vp(this.canvasH) / 2) * scale;
+  }
+
+  private adjustStrokeWidth(delta: number): void {
+    if (this.toolMode === 'fill') {
+      const next = this.fillTol + delta;
+      const clamped = Math.max(0, Math.min(128, next));
+      if (clamped === this.fillTol) return;
+      this.fillTol = clamped;
+      return;
+    }
+
+    if (this.toolMode === 'brush' || this.toolMode === 'eraser') {
+      const next = this.strokeWidth + delta;
+      const clamped = Math.max(1, Math.min(40, next));
+      if (clamped === this.strokeWidth) return;
+      this.strokeWidth = clamped;
+      return;
+    }
   }
 
   @Builder
@@ -997,19 +1610,27 @@ export struct EditorPage {
         .fontSize(20)
         .fontColor([this.toolMode === key ? $r('app.color.brand') : $r('sys.color.font_primary')])
       Text(label)
-        .fontSize(10)
+        .fontSize(12)
         .fontColor(this.toolMode === key ? $r('app.color.brand') : $r('sys.color.font_primary'))
     }
     .layoutWeight(1)
     .height(48)
     .justifyContent(FlexAlign.Center)
-    .onTouch((e: TouchEvent) => {
+    .onTouch((e: TouchEvent):boolean => {
       if (e.type === TouchType.Down) this.isPressingTool = true;
       else if (e.type === TouchType.Up || e.type === TouchType.Cancel) this.isPressingTool = false;
+      return true;
     })
     .onClick(() => {
       onTap();
     })
+    .onHover((isHover: boolean) => {
+      this.hoverStates[key] = isHover;
+    })
+    .onMouse(()=>{})
+    .backgroundColor(this.hoverStates[key] ? $r('app.color.hover_color') : Color.Transparent)
+    .borderRadius(12)
+    .hitTestBehavior(HitTestMode.Block)
   }
 
   @Builder
@@ -1019,20 +1640,28 @@ export struct EditorPage {
         .fontSize(20)
         .fontColor([this.canUndo && !this.isBusy ? $r('sys.color.font_primary') : $r('sys.color.font_tertiary')])
       Text('撤销')
-        .fontSize(10)
+        .fontSize(12)
         .fontColor(this.canUndo && !this.isBusy ? $r('sys.color.font_primary') : $r('sys.color.font_tertiary'))
     }
     .layoutWeight(1)
     .height(48)
     .justifyContent(FlexAlign.Center)
     .enabled(this.canUndo && !this.isBusy)
-    .onTouch((e: TouchEvent) => {
+    .onTouch((e: TouchEvent):boolean => {
       if (e.type === TouchType.Down) this.isPressingDoBar = true;
       else if (e.type === TouchType.Up || e.type === TouchType.Cancel) this.isPressingDoBar = false;
+      return true;
     })
     .onClick(async () => {
       await this.undo();
     })
+    .onHover((isHover: boolean) => {
+      this.hoverStates['undo'] = isHover;
+    })
+    .onMouse(()=>{})
+    .backgroundColor(this.hoverStates['undo'] ? $r('app.color.hover_color') : Color.Transparent)
+    .borderRadius(12)
+    .hitTestBehavior(HitTestMode.Block)
   }
 
   @Builder
@@ -1042,20 +1671,28 @@ export struct EditorPage {
         .fontSize(20)
         .fontColor([this.canRedo && !this.isBusy ? $r('sys.color.font_primary') : $r('sys.color.font_tertiary')])
       Text('重做')
-        .fontSize(10)
+        .fontSize(12)
         .fontColor(this.canRedo && !this.isBusy ? $r('sys.color.font_primary') : $r('sys.color.font_tertiary'))
     }
     .layoutWeight(1)
     .height(48)
     .justifyContent(FlexAlign.Center)
     .enabled(this.canRedo && !this.isBusy)
-    .onTouch((e: TouchEvent) => {
+    .onTouch((e: TouchEvent):boolean => {
       if (e.type === TouchType.Down) this.isPressingDoBar = true;
       else if (e.type === TouchType.Up || e.type === TouchType.Cancel) this.isPressingDoBar = false;
+      return true;
     })
     .onClick(async () => {
       await this.redo();
     })
+    .onHover((isHover: boolean) => {
+      this.hoverStates['redo'] = isHover;
+    })
+    .onMouse(()=>{})
+    .backgroundColor(this.hoverStates['redo'] ? $r('app.color.hover_color') : Color.Transparent)
+    .borderRadius(12)
+    .hitTestBehavior(HitTestMode.Block)
   }
 
   @Builder
@@ -1079,6 +1716,7 @@ export struct EditorPage {
             .onChange((value: number) => {
               this.fillTol = Math.round(value);
             })
+            .hitTestBehavior(this.toolMode === 'fill'?HitTestMode.Block:HitTestMode.None)
           Text(`${Math.round(this.fillTol)}`)
             .fontSize(12)
             .fontColor($r('app.color.brand'))
@@ -1110,6 +1748,7 @@ export struct EditorPage {
             .onChange((value: number) => {
               this.strokeWidth = value;
             })
+            .hitTestBehavior((this.toolMode === 'brush' || this.toolMode === 'eraser')?HitTestMode.Block:HitTestMode.None)
           SymbolGlyph($r('sys.symbol.circle_fill'))
             .fontColor([$r('sys.color.font_primary')])
             .fontSize(16)
@@ -1172,7 +1811,7 @@ export struct EditorPage {
               })
           }
           Text('颜色')
-            .fontSize(10)
+            .fontSize(12)
             .fontColor($r('sys.color.font_primary'))
         }
         .layoutWeight(1)
@@ -1181,6 +1820,14 @@ export struct EditorPage {
         .onClick(() => {
           this.colorDialogController?.open();
         })
+        .onHover((isHover: boolean) => {
+          this.hoverStates['color'] = isHover;
+        })
+        .onTouch((_e:TouchEvent)=>true)
+        .onMouse(()=>{})
+        .backgroundColor(this.hoverStates['color'] ? $r('app.color.hover_color') : Color.Transparent)
+        .borderRadius(12)
+        .hitTestBehavior(HitTestMode.Block)
       }
       .width('100%')
     }
@@ -1294,20 +1941,21 @@ export struct EditorPage {
         Stack() {
           Stack() {
             Canvas(this.canvasCtx)
-              .width(px2vp(this.project.width))
-              .height(px2vp(this.project.height))
+              .width(px2vp(this.canvasW))
+              .height(px2vp(this.canvasH))
               .backgroundColor(Color.White)
               .onReady(() => {
                 this.canvasCtx.globalCompositeOperation = 'source-over';
                 this.canvasCtx.globalAlpha = 1;
                 this.canvasCtx.fillStyle = '#FFFFFF';
-                this.canvasCtx.fillRect(0, 0, this.project.width, this.project.height);
+                this.canvasCtx.fillRect(0, 0, this.canvasW, this.canvasH);
                 this.loadExistingImage();
               })
               .onTouch((e: TouchEvent) => this.onCanvasTouch(e))
+              .onMouse((e: MouseEvent) => this.onCanvasMouse(e))
           }
-          .width(px2vp(this.project.width))
-          .height(px2vp(this.project.height))
+          .width(px2vp(this.canvasW))
+          .height(px2vp(this.canvasH))
           .clip(false)
           .translate({ x: this.offsetX, y: this.offsetY })
           .scale({
@@ -1363,6 +2011,27 @@ export struct EditorPage {
             this.PickerPreview()
           }
 
+          if (this.isDragHover) {
+            Column({space:12}){
+              SymbolGlyph($r('sys.symbol.picture_on_square'))
+                .fontSize(64)
+                .fontColor([$r('app.color.brand')])
+              Text('松手以叠加到画板')
+                .fontSize(22)
+                .fontWeight(FontWeight.Bold)
+                .fontColor($r('app.color.brand'))
+            }
+            .justifyContent(FlexAlign.Center)
+              .width('100%')
+              .height('100%')
+              .expandSafeArea([SafeAreaType.SYSTEM],[SafeAreaEdge.TOP,SafeAreaEdge.BOTTOM])
+              .backgroundColor('#2243A740')
+              .border({
+                width:2,
+                color:$r('app.color.brand')
+              })
+          }
+
           Column() {
             Blank()
               .layoutWeight(1)
@@ -1384,18 +2053,91 @@ export struct EditorPage {
           const availH = Number(newArea.height) - 32;
           if (availW <= 0 || availH <= 0) return;
 
-          const canvasVpW = px2vp(this.project.width);
-          const canvasVpH = px2vp(this.project.height);
+          const canvasVpW = px2vp(this.canvasW);
+          const canvasVpH = px2vp(this.canvasH);
           const s = Math.min(availW / canvasVpW, availH / canvasVpH);
           this.displayScale = Math.min(s, 1);
           this.clampOffset();
         })
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+        .onAxisEvent((e: AxisEvent) => this.onCanvasAxis(e))
       }
       .width('100%')
       .height('100%')
       .backgroundColor($r('sys.color.background_primary'))
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+      .focusable(true)
+      .defaultFocus(true)
+      .keyboardShortcut('z', [ModifierKey.CTRL], () => {
+        this.undo();
+      })
+      .keyboardShortcut('z', [ModifierKey.CTRL, ModifierKey.SHIFT], () => {
+        this.redo();
+      })
+      .keyboardShortcut('y', [ModifierKey.CTRL], () => {
+        this.redo();
+      })
+      .keyboardShortcut('=', [ModifierKey.CTRL], () => {
+        this.zoomAt(this.outerW / 2, this.outerH / 2, 1.1);
+      })
+      .keyboardShortcut('=', [ModifierKey.CTRL,ModifierKey.SHIFT], () => {
+        this.zoomAt(this.outerW / 2, this.outerH / 2, 1.1);
+      })
+      .keyboardShortcut('-', [ModifierKey.CTRL], () => {
+        this.zoomAt(this.outerW / 2, this.outerH / 2, 0.9);
+      })
+      .keyboardShortcut('0', [ModifierKey.CTRL], () => {
+        this.resetZoom();
+      })
+      .keyboardShortcut('s', [ModifierKey.CTRL], () => {
+        this.saveToSandbox().then((ok: boolean) => {
+          promptAction.openToast({ message: ok ? '已保存' : '保存失败' }).catch(() => {});
+        });
+      })
+      .onKeyPreIme((event:KeyEvent):boolean=> {
+        if (event.type !== KeyType.Down) return false;
+        switch (event.keyCode) {
+          case KeyCode.KEYCODE_B:
+            this.toolMode = 'brush';
+            this.showPickerPreview = false;
+            return true;
+          case KeyCode.KEYCODE_E:
+            this.toolMode = 'eraser';
+            this.showPickerPreview = false;
+            return true;
+          case KeyCode.KEYCODE_F:
+            this.toolMode = 'fill';
+            this.showPickerPreview = false;
+            return true;
+          case KeyCode.KEYCODE_I:
+            this.toolMode = 'picker';
+            this.showPickerPreview = false;
+            return true;
+          case KeyCode.KEYCODE_H:
+            this.toolMode = 'pan';
+            this.showPickerPreview = false;
+            return true;
+          case KeyCode.KEYCODE_LEFT_BRACKET:
+            this.adjustStrokeWidth(-2);
+            return true;
+          case KeyCode.KEYCODE_RIGHT_BRACKET:
+            this.adjustStrokeWidth(2);
+            return true;
+          default:
+            return false;
+        }
+      })
+      .allowDrop([uniformTypeDescriptor.UniformDataType.IMAGE])
+      .onDragEnter(() => {
+        this.isDragHover = true;
+      })
+      .onDragLeave(() => {
+        this.isDragHover = false;
+      })
+      .onDrop((event: DragEvent) => {
+        this.isDragHover = false;
+        this.handleImageDrop(event);
+      })
     }
     .titleBar({
       style: {
@@ -1409,32 +2151,7 @@ export struct EditorPage {
           mainTitle: this.project.name
         },
         menu: {
-          value: [
-            {
-              content: {
-                label: this.isDirty ? '保存' : '已保存',
-                icon: $r('sys.symbol.save'),
-                action: async () => {
-                  const ok = await this.saveToSandbox();
-                  promptAction.openToast({ message: ok ? '已保存' : '保存失败' }).catch(()=>{});
-                }
-              }
-            },
-            {
-              content: {
-                label: '保存到相册',
-                icon: $r('sys.symbol.picture_badge_arrow_down'),
-                action: () => this.saveToGallery()
-              }
-            },
-            {
-              content: {
-                label: '清空画布',
-                icon: $r('sys.symbol.trash'),
-                action: () => this.clearCanvas()
-              }
-            }
-          ],
+          value: this.buildMenuItems(),
           maxCount: 2
         }
       },
@@ -1447,7 +2164,7 @@ export struct EditorPage {
     .onBackPressed(() => {
       if (this.isDirty) {
         this.saveToSandbox().then((value: boolean) => {
-          promptAction.openToast({ message: value ? '已保存' : '保存失败' }).catch(()=>{});
+          promptAction.openToast({ message: value ? '已保存' : '保存失败' }).catch(() => {});
           this.pathStack.pop();
         });
         return true;

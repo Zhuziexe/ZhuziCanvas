@@ -2,9 +2,10 @@ import { common } from '@kit.AbilityKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { LengthMetrics, promptAction } from '@kit.ArkUI';
+import { componentSnapshot, LengthMetrics, promptAction } from '@kit.ArkUI';
 import {
-  HdsNavigation, hdsMaterial, ScrollEffectType, TextStyleMode
+  HdsNavigation, hdsMaterial, ScrollEffectType, TextStyleMode,
+  HdsNavigationTitleMode
 } from '@kit.UIDesignKit';
 import { ProjectStore, DrawProject } from '../common/ProjectStore';
 import { EditorPage } from './EditorPage';
@@ -15,14 +16,20 @@ import { PrivacyConsent } from './PrivacyConsent';
 import { DialogType, TextType } from '../common/CustomTypes';
 import { PrivacyConsentVM } from '../viewmodels/PrivacyConsentVM';
 import { PrivacyFullPage } from './PrivacyFullPage';
-import { preferences } from '@kit.ArkData';
+import { preferences, unifiedDataChannel } from '@kit.ArkData';
 import { AboutPage } from './AboutPage';
+import { uniformTypeDescriptor, uniformDataStruct } from '@kit.ArkData';
+import { ImageOverlayPage, ImageOverlayParam } from './ImageOverlayPage';
+import { TextPage, TextParam } from './TextPage';
+import { deviceInfo } from '@kit.BasicServicesKit';
 
 type SortBy = 'time' | 'name';
+type ViewMode = 'list' | 'grid';
 
 const THUMB_MAX_SIDE = 256;
 const PREF_NAME = 'app_settings';
 const KEY_PRIVACY_AGREED = 'privacy_agreed';
+const KEY_VIEW_MODE = 'project_view_mode';
 
 class ProjectDataSource implements IDataSource {
   private projects: DrawProject[] = [];
@@ -64,14 +71,19 @@ class ProjectDataSource implements IDataSource {
 struct Index {
   private dataSource: ProjectDataSource = new ProjectDataSource();
   @State sortBy: SortBy = 'time';
+  @State viewMode: ViewMode = 'list';
   @State projectCount: number = 0;
   @State thumbVersion: number = 0;
   @State isShowingPrivacy: boolean = false;
   @State isShowingFullPrivacy: boolean = false;
   @State isShowingAbout: boolean = false;
+  @State isDragHover: boolean = false;
+  @State contextMenuProject: DrawProject | null = null;
+  @State draggingProjectId: string = '';
 
-  private privacyVM:PrivacyConsentVM = new PrivacyConsentVM();
+  private privacyVM: PrivacyConsentVM = new PrivacyConsentVM();
 
+  @StorageProp('windowWidth') windowWidth: number = 0;
   @StorageLink('projectsRefreshToken') @Watch('onProjectsChanged')
   projectsRefreshToken: number = 0;
 
@@ -80,6 +92,7 @@ struct Index {
   private newProjectDialogController: CustomDialogController | null = null;
   private renameDialogController: CustomDialogController | null = null;
   private scroller: Scroller = new Scroller();
+  private gridscroller:Scroller = new Scroller();
 
   onProjectsChanged(): void {
     this.loadProjects();
@@ -90,11 +103,39 @@ struct Index {
     if (AppStorage.get<number>('projectsRefreshToken') === undefined) {
       AppStorage.setOrCreate('projectsRefreshToken', 0);
     }
+    this.restoreViewMode();
     this.loadProjects();
     this.generateMissingThumbs();
     this.cleanOrphanImages();
     this.initPrivacyVM();
     this.checkPrivacyConsent();
+  }
+
+  private restoreViewMode(): void {
+    try {
+      const pref = preferences.getPreferencesSync(this.context, { name: PREF_NAME });
+      this.viewMode = pref.getSync(KEY_VIEW_MODE, 'list') as ViewMode;
+    } catch (e) {
+      this.viewMode = 'list';
+    }
+  }
+
+  private toggleView(): void {
+    this.viewMode = this.viewMode === 'list' ? 'grid' : 'list';
+    preferences.getPreferences(this.context, PREF_NAME).then((pref) => {
+      pref.put(KEY_VIEW_MODE, this.viewMode);
+      pref.flush();
+    }).catch(() => {});
+  }
+
+  private getColumnsTemplate(): string {
+    const w = this.windowWidth;
+    let n: number;
+    if (w < 600) n = 2;
+    else if (w < 840) n = 3;
+    else if (w < 1200) n = 4;
+    else n = 5;
+    return Array(n).fill('1fr').join(' ');
   }
 
   private checkPrivacyConsent() {
@@ -122,11 +163,11 @@ struct Index {
     }
   }
 
-  private initPrivacyVM(){
+  private initPrivacyVM() {
     this.privacyVM.dialogType = DialogType.SHEET;
     this.privacyVM.sheetType = SheetType.BOTTOM;
     this.privacyVM.appName = '竹子画板';
-    this.privacyVM.appDescription = '一个只属于你的画板';
+    this.privacyVM.appDescription = '一个只属于你自己的开源画板';
 
     this.privacyVM.document = [
       {
@@ -134,7 +175,7 @@ struct Index {
         type: TextType.PLAIN
       },
       {
-        text: '不联网、不申请任何权限、不收集任何数据',
+        text: '无需联网、不申请任何需要您手动授权的系统权限、也不会收集任何个人信息',
         type: TextType.PLAIN,
         color: $r('sys.color.font_primary'),
         fontWeight: FontWeight.Medium
@@ -146,23 +187,23 @@ struct Index {
         type: TextType.PLAIN
       },
       {
-        text:'关于竹子画板与隐私的说明',
-        type:TextType.ACTION,
-        color:$r('app.color.brand'),
-        onAction:()=>{
+        text: '关于竹子画板与隐私的说明',
+        type: TextType.ACTION,
+        color: $r('app.color.brand'),
+        onAction: () => {
           this.isShowingFullPrivacy = true;
         }
       },
-      { text:'，', type:TextType.PLAIN },
+      { text: '，', type: TextType.PLAIN },
       {
-        text:'权限使用说明',
-        type:TextType.ACTION,
-        color:$r('app.color.brand'),
-        onAction:()=>{
+        text: '权限使用说明',
+        type: TextType.ACTION,
+        color: $r('app.color.brand'),
+        onAction: () => {
           this.showPermissionInfo();
         }
       },
-      { text:'。', type:TextType.PLAIN }
+      { text: '。', type: TextType.PLAIN }
     ];
 
     this.privacyVM.onAccept = async () => {
@@ -170,9 +211,9 @@ struct Index {
       await this.markPrivacyAgreed();
     };
 
-    this.privacyVM.onReject = () => {
+    this.privacyVM.onReject = async () => {
       try {
-        this.context.terminateSelf();
+        await this.context.terminateSelf();
       } catch {}
     };
   }
@@ -180,13 +221,15 @@ struct Index {
   private showPermissionInfo(): void {
     AlertDialog.show({
       title: '权限使用说明',
-      message: '竹子画板不申请任何系统权限。\n\n' +
+      message: '竹子画板不申请任何需要您手动授权的系统权限。\n\n' +
         '基于安全访问机制，竹子画板只能访问你主动选择的图片，看不到相册里的其他内容。\n\n' +
-        '应用不会读取你的通讯录、位置、麦克风、摄像头或任何其他个人信息。',
+        '应用不会读取你的通讯录、位置、麦克风、摄像头或任何其他个人信息。\n\n' +
+        '应用声明了“预关闭动作”权限（ohos.permission.PREPARE_APP_TERMINATE），' +
+        '用于在电脑端关闭应用时弹出“是否保存”确认提示。该权限系统自动授予，不涉及任何数据收集。',
       confirm: {
         value: '知道了',
         action: () => {},
-        fontColor:$r('app.color.brand')
+        fontColor: $r('app.color.brand')
       }
     });
   }
@@ -327,17 +370,17 @@ struct Index {
       const list = await ProjectStore.list();
       const target = list.find((p: DrawProject) => p.id === project.id);
       if (!target) {
-        promptAction.openToast({ message: '项目不存在' }).catch(()=>{});
+        promptAction.openToast({ message: '项目不存在' }).catch(() => {});
         return;
       }
       target.name = newName;
       target.updatedAt = Date.now();
       await ProjectStore.save(list);
       await this.loadProjects();
-      promptAction.openToast({ message: '已重命名' }).catch(()=>{});
+      promptAction.openToast({ message: '已重命名' }).catch(() => {});
     } catch (e) {
       console.error('重命名失败:', e);
-      promptAction.openToast({ message: '重命名失败' }).catch(()=>{});
+      promptAction.openToast({ message: '重命名失败' }).catch(() => {});
     }
   }
 
@@ -346,14 +389,14 @@ struct Index {
       title: '确认删除',
       message: `确定要删除项目"${project.name}"吗？`,
       buttons: [
-        { value: '取消', action: () => {} },
+        { value: '取消', action: () => {}, fontColor: $r('app.color.brand') },
         {
           value: '确定',
           fontColor: $r('sys.color.warning'),
           action: async () => {
             await ProjectStore.remove(project.id);
             await this.loadProjects();
-            promptAction.openToast({ message: '已删除' }).catch(()=>{});
+            promptAction.openToast({ message: '已删除' }).catch(() => {});
           }
         }
       ]
@@ -389,6 +432,128 @@ struct Index {
     }
   }
 
+  private async importImagesFromUris(uris: string[]): Promise<number> {
+    if (!uris || uris.length === 0) return 0;
+    let successCount = 0;
+
+    const usedNames = new Set<string>(this.dataSource.getAllNames());
+
+    for (const sourceUri of uris) {
+      try {
+        const srcFile = fileIo.openSync(sourceUri, fileIo.OpenMode.READ_ONLY);
+        const stat = fileIo.statSync(srcFile.fd);
+        const buffer = new ArrayBuffer(stat.size);
+        fileIo.readSync(srcFile.fd, buffer);
+        fileIo.closeSync(srcFile);
+
+        let imgW = 1280;
+        let imgH = 720;
+        let pixelMap: image.PixelMap | null = null;
+
+        try {
+          const imageSource = image.createImageSource(buffer);
+          const info = await imageSource.getImageInfo();
+          imgW = info.size.width;
+          imgH = info.size.height;
+          pixelMap = await imageSource.createPixelMap();
+          imageSource.release();
+        } catch (e) {
+          console.warn('读取图片失败,使用默认尺寸');
+        }
+
+        let baseName = '导入项目';
+        let finalName = baseName;
+        let counter = 2;
+        while (usedNames.has(finalName)) {
+          finalName = `${baseName}(${counter})`;
+          counter++;
+        }
+        usedNames.add(finalName);
+
+        const newId = Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
+        const destPath = ProjectStore.getImagePath(newId);
+
+        let pngBuffer: ArrayBuffer | null = null;
+
+        if (pixelMap) {
+          const maxSide = Math.max(imgW, imgH);
+          if (maxSide > 2560) {
+            const s = 2560 / maxSide;
+            await pixelMap.scale(s, s);
+            imgW = Math.max(1, Math.round(imgW * s));
+            imgH = Math.max(1, Math.round(imgH * s));
+          }
+
+          const packer = image.createImagePacker();
+          try {
+            pngBuffer = await packer.packing(pixelMap, {
+              format: 'image/png',
+              quality: 100
+            });
+          } finally {
+            await packer.release();
+          }
+        }
+
+        if (!pngBuffer) {
+          pngBuffer = buffer;
+        }
+
+        const destFile = fileIo.openSync(destPath,
+          fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
+        try {
+          fileIo.writeSync(destFile.fd, pngBuffer);
+        } finally {
+          fileIo.closeSync(destFile);
+        }
+
+        if (pixelMap) {
+          try {
+            const thumbPath = ProjectStore.getThumbPath(newId);
+            const thumbInfo = await pixelMap.getImageInfo();
+            const thumbMaxSide = Math.max(thumbInfo.size.width, thumbInfo.size.height);
+            if (thumbMaxSide > THUMB_MAX_SIDE) {
+              const s = THUMB_MAX_SIDE / thumbMaxSide;
+              await pixelMap.scale(s, s);
+            }
+            const packer = image.createImagePacker();
+            const tb = await packer.packing(pixelMap, { format: 'image/png', quality: 80 });
+            const tf = fileIo.openSync(thumbPath,
+              fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
+            try {
+              fileIo.writeSync(tf.fd, tb);
+            } finally {
+              fileIo.closeSync(tf);
+            }
+            await packer.release();
+          } catch (e) {
+            console.warn('导入时生成缩略图失败:', e);
+          } finally {
+            await pixelMap.release();
+          }
+        }
+
+        const project: DrawProject = {
+          id: newId,
+          name: finalName,
+          width: imgW,
+          height: imgH,
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        };
+        await ProjectStore.upsert(project);
+        successCount++;
+      } catch (e) {
+        console.error('导入单张图片失败:', e);
+      }
+    }
+
+    if (successCount > 0) {
+      await this.loadProjects();
+    }
+    return successCount;
+  }
+
   async importPng(): Promise<void> {
     try {
       const photoSelectOptions = new photoAccessHelper.PhotoSelectOptions();
@@ -402,87 +567,84 @@ struct Index {
         return;
       }
 
-      const sourceUri = result.photoUris[0];
-      const srcFile = fileIo.openSync(sourceUri, fileIo.OpenMode.READ_ONLY);
-      const stat = fileIo.statSync(srcFile.fd);
-      const buffer = new ArrayBuffer(stat.size);
-      fileIo.readSync(srcFile.fd, buffer);
-      fileIo.closeSync(srcFile);
-
-      let imgW = 1280;
-      let imgH = 720;
-      let pixelMap: image.PixelMap | null = null;
-      try {
-        const imageSource = image.createImageSource(buffer);
-        const info = await imageSource.getImageInfo();
-        imgW = info.size.width;
-        imgH = info.size.height;
-        pixelMap = await imageSource.createPixelMap();
-        imageSource.release();
-      } catch (e) {
-        console.warn('读取图片失败，使用默认尺寸');
-      }
-
-      let baseName = '导入项目';
-      const used = this.dataSource.getAllNames();
-      let finalName = baseName;
-      let counter = 2;
-      while (used.includes(finalName)) {
-        finalName = `${baseName}(${counter})`;
-        counter++;
-      }
-
-      const newId = Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
-      const destPath = ProjectStore.getImagePath(newId);
-      const destFile = fileIo.openSync(destPath,
-        fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
-      fileIo.writeSync(destFile.fd, buffer);
-      fileIo.closeSync(destFile);
-
-      if (pixelMap) {
-        try {
-          const thumbPath = ProjectStore.getThumbPath(newId);
-          const info = await pixelMap.getImageInfo();
-          const maxSide = Math.max(info.size.width, info.size.height);
-          if (maxSide > THUMB_MAX_SIDE) {
-            const s = THUMB_MAX_SIDE / maxSide;
-            await pixelMap.scale(s, s);
-          }
-          const packer = image.createImagePacker();
-          const tb = await packer.packing(pixelMap, { format: 'image/png', quality: 80 });
-          const tf = fileIo.openSync(thumbPath,
-            fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
-          fileIo.writeSync(tf.fd, tb);
-          fileIo.closeSync(tf);
-          await packer.release();
-        } catch (e) {
-          console.warn('导入时生成缩略图失败:', e);
-        } finally {
-          await pixelMap.release();
-        }
-      }
-
-      const project: DrawProject = {
-        id: newId,
-        name: finalName,
-        width: imgW,
-        height: imgH,
-        createdAt: Date.now(),
-        updatedAt: Date.now()
-      };
-      await ProjectStore.upsert(project);
-      await this.loadProjects();
-      promptAction.openToast({ message: '导入成功' }).catch(()=>{});
+      const ok = await this.importImagesFromUris(result.photoUris);
+      promptAction.openToast({ message: ok > 0 ? '导入成功' : '导入失败' }).catch(() => {});
     } catch (e) {
       console.error('导入失败:', e);
-      promptAction.openToast({ message: '导入失败' }).catch(()=>{});
+      promptAction.openToast({ message: '导入失败' }).catch(() => {});
     }
+  }
+
+  private extractImageUris(event: DragEvent): string[] {
+    const uris: string[] = [];
+    try {
+      const dragData = event.getData();
+      if (!dragData) return uris;
+
+      const records = dragData.getRecords();
+      if (!records || records.length === 0) return uris;
+
+      for (const record of records) {
+        const types = record.getTypes();
+        if (!types || !types.includes(uniformTypeDescriptor.UniformDataType.FILE_URI)) continue;
+
+        const fileUriData = record.getEntry(
+          uniformTypeDescriptor.UniformDataType.FILE_URI
+        ) as uniformDataStruct.FileUri;
+
+        if (!fileUriData?.oriUri) continue;
+
+        const td = uniformTypeDescriptor.getTypeDescriptor(fileUriData.fileType);
+        const isImage = td
+          ? td.belongsTo(uniformTypeDescriptor.UniformDataType.IMAGE)
+          : /\.(png|jpe?g|webp|bmp|gif|heic|heif)$/i.test(fileUriData.oriUri);
+
+        if (isImage) {
+          uris.push(fileUriData.oriUri);
+        }
+      }
+    } catch (e) {
+      console.error('解析拖放数据失败:', e);
+    }
+    return uris;
+  }
+
+  private async handleImageDrop(event: DragEvent): Promise<void> {
+    if (this.draggingProjectId != '') {
+      console.info('忽略本应用自己拖出的数据');
+      return;
+    }
+    const uris = this.extractImageUris(event);
+    if (uris.length === 0) {
+      promptAction.openToast({ message: '只能拖入图片文件' }).catch(() => {});
+      return;
+    }
+    const ok = await this.importImagesFromUris(uris);
+    promptAction.openToast({ message: `已导入 ${ok} 张图片` }).catch(() => {});
+  }
+
+  private buildDragData(event: DragEvent, project: DrawProject): void {
+    const imagePath = ProjectStore.getImagePath(project.id);
+    const uri = fileUri.getUriFromPath(imagePath);
+
+    const imageRecord = new unifiedDataChannel.Image();
+    imageRecord.imageUri = uri;
+
+    const unifiedData = new unifiedDataChannel.UnifiedData(imageRecord);
+    event.setData(unifiedData);
   }
 
   @Builder
   PageMap(name: string, param: object) {
     if (name === 'EditorPage') {
       EditorPage({ project: param as DrawProject })
+    } else if (name === 'ImageOverlayPage') {
+      ImageOverlayPage({
+        project: (param as ImageOverlayParam).project,
+        overlayUri: (param as ImageOverlayParam).overlayUri
+      })
+    } else if (name === 'TextPage') {
+      TextPage({ project: (param as TextParam).project })
     }
   }
 
@@ -508,54 +670,161 @@ struct Index {
   }
 
   @Builder
+  projectContextMenu(): void {
+    Menu() {
+      MenuItem({ content: '重命名' })
+        .onClick(() => {
+          if (this.contextMenuProject) this.showRenameDialog(this.contextMenuProject);
+        })
+      MenuItem({ content: '删除' })
+        .onClick(() => {
+          if (this.contextMenuProject) this.deleteProject(this.contextMenuProject);
+        })
+        .contentFontColor($r('sys.color.warning'))
+    }
+  }
+
+  @Builder
+  ProjectListCard(project: DrawProject) {
+    Row() {
+      Image(this.getThumbUri(project.id))
+        .width(48)
+        .height(48)
+        .borderRadius(8)
+        .objectFit(ImageFit.Cover)
+        .backgroundColor($r('sys.color.background_tertiary'))
+        .alt($r('app.media.startIcon'))
+        .draggable(false)
+        .id(`thumb_${project.id}`)
+        .interpolation(ImageInterpolation.Low)
+
+      Column({ space: 4 }) {
+        Text(project.name)
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('sys.color.font_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(`${project.width} × ${project.height}`)
+          .fontSize(12)
+          .fontColor($r('sys.color.font_secondary'))
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 12 })
+
+      Button() {
+        SymbolGlyph($r('sys.symbol.dot_grid_1x2'))
+          .fontSize(24)
+          .fontColor([$r('sys.color.font_primary')])
+      }
+      .buttonStyle(ButtonStyleMode.TEXTUAL)
+      .width(40)
+      .height(40)
+      .bindMenu([
+        { value: '重命名', action: () => this.showRenameDialog(project) },
+        { value: '删除', action: () => this.deleteProject(project) }
+      ], getMenuOptions())
+      .draggable(false)
+    }
+    .width('100%')
+    .padding(12)
+    .backgroundColor($r('app.color.listitem'))
+    .borderRadius(12)
+    .hoverEffect(HoverEffect.Highlight)
+    .draggable(true)
+    .onDragStart((event: DragEvent) => {
+      this.draggingProjectId = project.id;
+      this.buildDragData(event, project);
+      try {
+        const pm = componentSnapshot.getSync(`thumb_${project.id}`);
+        return { pixelMap: pm } as DragItemInfo;
+      } catch (e) {
+        console.warn('获取缩略图快照失败，回退默认预览', e);
+        return {} as DragItemInfo;
+      }
+    })
+    .onDragEnd(() => {
+      this.draggingProjectId = '';
+    })
+    .onClick(() => {
+      if (this.draggingProjectId === project.id) return;
+      this.openProject(project);
+    })
+    .onMouse((event: MouseEvent) => {
+      if (event.button === MouseButton.Right) {
+        this.contextMenuProject = project;
+      }
+    })
+    .bindContextMenu(this.projectContextMenu, ResponseType.RightClick)
+  }
+
+  @Builder
+  ProjectGridCard(project: DrawProject) {
+    Column({ space: 8 }) {
+      Image(this.getThumbUri(project.id))
+        .width('100%')
+        .aspectRatio(1)
+        .borderRadius(12)
+        .objectFit(ImageFit.Cover)
+        .backgroundColor($r('sys.color.background_tertiary'))
+        .alt($r('app.media.startIcon'))
+        .draggable(false)
+        .id(`thumb_${project.id}`)
+        .interpolation(ImageInterpolation.Low)
+
+      Text(project.name)
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('sys.color.font_primary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+    }
+    .width('100%')
+    .padding(8)
+    .backgroundColor($r('app.color.listitem'))
+    .borderRadius(12)
+    .hoverEffect(HoverEffect.Highlight)
+    .draggable(true)
+    .onDragStart((event: DragEvent) => {
+      this.draggingProjectId = project.id;
+      this.buildDragData(event, project);
+      try {
+        const pm = componentSnapshot.getSync(`thumb_${project.id}`);
+        return { pixelMap: pm } as DragItemInfo;
+      } catch (e) {
+        console.warn('获取缩略图快照失败，回退默认预览', e);
+        return {} as DragItemInfo;
+      }
+    })
+    .onDragEnd(() => {
+      this.draggingProjectId = '';
+    })
+    .onClick(() => {
+      if (this.draggingProjectId === project.id) return;
+      this.openProject(project);
+    })
+    .onTouch((e: TouchEvent) => {
+      if (e.type === TouchType.Down) {
+        this.contextMenuProject = project;
+      }
+    })
+    .onMouse((event: MouseEvent) => {
+      if (event.button === MouseButton.Right) {
+        this.contextMenuProject = project;
+      }
+    })
+    .bindContextMenu(this.projectContextMenu, ResponseType.RightClick)
+    .bindContextMenu(this.projectContextMenu, ResponseType.LongPress)
+  }
+
+  @Builder
   ProjectList() {
     List({ space: 8, scroller: this.scroller }) {
       LazyForEach(this.dataSource, (project: DrawProject) => {
         ListItem() {
-          Row() {
-            Image(this.getThumbUri(project.id))
-              .width(48)
-              .height(48)
-              .borderRadius(8)
-              .objectFit(ImageFit.Cover)
-              .backgroundColor($r('sys.color.background_tertiary'))
-              .alt($r('app.media.startIcon'))
-              .draggable(false)
-              .interpolation(ImageInterpolation.Low)
-
-            Column({ space: 4 }) {
-              Text(project.name)
-                .fontSize(16)
-                .fontWeight(FontWeight.Medium)
-                .fontColor($r('sys.color.font_primary'))
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-              Text(`${project.width} × ${project.height}`)
-                .fontSize(12)
-                .fontColor($r('sys.color.font_secondary'))
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-            .padding({ left: 12 })
-
-            Button() {
-              SymbolGlyph($r('sys.symbol.dot_grid_1x2'))
-                .fontSize(24)
-                .fontColor([$r('sys.color.font_primary')])
-            }
-            .buttonStyle(ButtonStyleMode.TEXTUAL)
-            .width(40)
-            .height(40)
-            .bindMenu([
-              { value: '重命名', action: () => this.showRenameDialog(project) },
-              { value: '删除', action: () => this.deleteProject(project) }
-            ], getMenuOptions())
-          }
-          .width('100%')
-          .padding(12)
-          .backgroundColor($r('app.color.listitem'))
-          .borderRadius(12)
-          .onClick(() => this.openProject(project))
+          this.ProjectListCard(project)
         }
         .padding({ left: 16, right: 16 })
       }, (project: DrawProject) => `${project.id}_${project.updatedAt}_${this.thumbVersion}`)
@@ -572,8 +841,30 @@ struct Index {
   }
 
   @Builder
+  ProjectGrid() {
+    Grid(this.gridscroller) {
+      LazyForEach(this.dataSource, (project: DrawProject) => {
+        GridItem() {
+          this.ProjectGridCard(project)
+        }
+      }, (project: DrawProject) => `${project.id}_${project.updatedAt}_${this.thumbVersion}`)
+    }
+    .columnsTemplate(this.getColumnsTemplate())
+    .columnsGap(12)
+    .rowsGap(12)
+    .padding({ left: 16, right: 16, top: 8, bottom: 16 })
+    .width('100%')
+    .height('100%')
+    .layoutWeight(1)
+    .edgeEffect(EdgeEffect.Spring)
+    .cachedCount(3)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .clip(false)
+  }
+
+  @Builder
   buildPrivacy() {
-    PrivacyConsent({model:this.privacyVM})
+    PrivacyConsent({ model: this.privacyVM, windowWidth: this.windowWidth })
   }
 
   @Builder
@@ -584,9 +875,9 @@ struct Index {
   @Builder
   buildAbout() {
     AboutPage({
-      onPermission:()=>{this.showPermissionInfo();},
-      onPrivacy:()=>{this.isShowingFullPrivacy = true;},
-      onCode:()=>{
+      onPermission: () => { this.showPermissionInfo(); },
+      onPrivacy: () => { this.isShowingFullPrivacy = true; },
+      onCode: () => {
         try {
           this.context.startAbility({
             action: 'ohos.want.action.viewData',
@@ -597,7 +888,8 @@ struct Index {
         } catch (e) {
           console.error('打开浏览器异常:', e);
         }
-      }
+      },
+      windowWidth: this.windowWidth
     })
   }
 
@@ -606,11 +898,15 @@ struct Index {
       Column()
         .width(0)
         .height(0)
-        .bindSheet($$this.isShowingAbout,this.buildAbout,{detents:[SheetSize.LARGE],dragBar:false, preferType: SheetType.CENTER })
+        .bindSheet($$this.isShowingAbout, this.buildAbout, {
+          detents: [SheetSize.LARGE], dragBar: false, preferType: SheetType.CENTER
+        })
       Column() {
-        if(!this.isShowingPrivacy) {
+        if (!this.isShowingPrivacy) {
           if (this.projectCount === 0) {
             this.EmptyState()
+          } else if (this.viewMode === 'grid') {
+            this.ProjectGrid()
           } else {
             this.ProjectList()
           }
@@ -621,16 +917,38 @@ struct Index {
       .height('100%')
       .backgroundColor($r('sys.color.background_secondary'))
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .bindSheet($$this.isShowingPrivacy, this.buildPrivacy,{
-        detents:[SheetSize.LARGE],
-        dragBar:false,
-        showClose:false,
-        preferType: SheetType.CENTER
+      .border({
+        width: this.isDragHover ? (this.draggingProjectId == '' ? 2 : 0) : 0,
+        color: $r('app.color.brand'),
+        radius: 12
+      })
+      .allowDrop(this.draggingProjectId == '' ? [uniformTypeDescriptor.UniformDataType.IMAGE] : [])
+      .onDragEnter(() => {
+        this.isDragHover = true;
+      })
+      .onDragLeave(() => {
+        this.isDragHover = false;
+      })
+      .onDrop((event: DragEvent) => {
+        this.isDragHover = false;
+        this.handleImageDrop(event);
+      })
+      .bindSheet($$this.isShowingPrivacy, this.buildPrivacy, {
+        detents: [SheetSize.LARGE],
+        dragBar: false,
+        showClose: false,
+        preferType: SheetType.CENTER,
+        onWillDismiss: (action: DismissSheetAction) => {
+          if (action.reason === DismissReason.PRESS_BACK) {
+            this.privacyVM.onReject();
+            return;
+          }
+        }
       })
     }
-    .bindSheet($$this.isShowingFullPrivacy,this.buildFullPrivacy,{
-      detents:[SheetSize.LARGE],
-      dragBar:false,
+    .bindSheet($$this.isShowingFullPrivacy, this.buildFullPrivacy, {
+      detents: [SheetSize.LARGE],
+      dragBar: false,
       preferType: SheetType.CENTER
     })
     .mode(NavigationMode.Stack)
@@ -659,7 +977,14 @@ struct Index {
             },
             {
               content: {
-                label: '导入 PNG',
+                label: this.viewMode === 'list' ? '宫格视图' : '列表视图',
+                icon: this.viewMode === 'list' ? $r('sys.symbol.grid') : $r('sys.symbol.list_bullet'),
+                action: () => this.toggleView()
+              }
+            },
+            {
+              content: {
+                label: '导入图片',
                 icon: $r('sys.symbol.picture'),
                 action: () => this.importPng()
               }
@@ -704,7 +1029,9 @@ struct Index {
         }
       }
     })
-    .bindToScrollable([this.scroller])
+    .titleMode(deviceInfo.deviceType == deviceInfo.DeviceTypes.TYPE_2IN1 ? HdsNavigationTitleMode.MINI : HdsNavigationTitleMode.FREE)
+    .hideBackButton(true)
+    .bindToScrollable([this.scroller,this.gridscroller])
     .backgroundColor($r('sys.color.background_secondary'))
   }
 }

@@ -13,7 +13,7 @@ export struct NewProjectDialog {
   @State inputh: string = '720';
   @State sizeError: string = '';
 
-  private static readonly MIN_SIZE = 256;
+  private static readonly MIN_SIZE = 32;
   private static readonly MAX_SIZE = 2560;
   private static readonly MAX_LEN = 4;
 
@@ -177,11 +177,13 @@ export struct NewProjectDialog {
         Button('取消')
           .layoutWeight(1)
           .buttonStyle(ButtonStyleMode.NORMAL)
+          .fontColor($r('app.color.brand'))
           .onClick(() => this.controller?.close())
 
         Button('创建')
           .layoutWeight(1)
           .buttonStyle(ButtonStyleMode.EMPHASIZED)
+          .backgroundColor($r('app.color.brand'))
           .onClick(() => {
             const name = this.name.trim();
             if (!name) {

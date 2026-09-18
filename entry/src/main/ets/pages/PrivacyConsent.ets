@@ -8,6 +8,9 @@ export struct PrivacyConsent {
   @Param @Require
   public model: PrivacyConsentVM;
 
+  @Param @Require
+  windowWidth:number;
+
   private abilityContext: common.UIAbilityContext =
     this.getUIContext().getHostContext() as common.UIAbilityContext;
   private listener: WindowListener = new WindowListener(this.abilityContext);
@@ -75,7 +78,7 @@ export struct PrivacyConsent {
     }
     .width('100%')
     .height('100%')
-    .padding({bottom:`${this.listener.avoidArea.bottom}px`})
+    .padding(this.windowWidth < 600?{bottom:`${this.listener.avoidArea.bottom}px`}:{})
   }
 
   @Builder
@@ -104,13 +107,13 @@ export struct PrivacyConsent {
   @Builder
   private buildButtons(): void {
     Row({ space: 12 }) {
-      Button('退出应用')
+      Button('取消')
         .type(ButtonType.ROUNDED_RECTANGLE)
         .fontColor($r('app.color.brand'))
         .backgroundColor($r('sys.color.comp_background_tertiary'))
         .layoutWeight(1)
         .onClick(() => this.model.onReject())
-      Button('同意并继续')
+      Button('同意')
         .type(ButtonType.ROUNDED_RECTANGLE)
         .backgroundColor($r('app.color.brand'))
         .fontColor(Color.White)

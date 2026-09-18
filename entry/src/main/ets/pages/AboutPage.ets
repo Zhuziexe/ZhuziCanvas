@@ -12,6 +12,9 @@ export struct AboutPage {
   @Param @Require
   onCode:()=>void;
 
+  @Param @Require
+  windowWidth:number;
+
   private abilityContext: common.UIAbilityContext =
     this.getUIContext().getHostContext() as common.UIAbilityContext;
   private listener: WindowListener = new WindowListener(this.abilityContext);
@@ -49,7 +52,7 @@ export struct AboutPage {
             .fontColor($r('sys.color.font_primary'))
             .margin({ bottom: 8 })
 
-          Text('一个只属于你的画板')
+          Text('一个只属于你自己的开源画板')
             .fontSize(14)
             .fontColor($r('sys.color.font_secondary'))
 
@@ -76,7 +79,7 @@ export struct AboutPage {
     }
     .width('100%')
     .height('100%')
-    .padding({bottom:`${this.listener.avoidArea.bottom}px`})
+    .padding(this.windowWidth < 600 ? {bottom:`${this.listener.avoidArea.bottom}px`} : {})
   }
 
   @Builder
