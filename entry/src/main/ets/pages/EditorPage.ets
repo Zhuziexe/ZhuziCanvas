@@ -808,6 +808,7 @@ export struct EditorPage {
   private zoomAt(xVp: number, yVp: number, factor: number): void {
     const oldScale = this.userScale;
     const newScale = this.clampScale(oldScale * factor);
+    console.info(`zoomAt: factor=${factor} old=${oldScale} new=${newScale} offset=(${this.offsetX},${this.offsetY})`);
     if (newScale === oldScale) return;
 
     const mx = xVp - this.outerW / 2;
@@ -820,6 +821,7 @@ export struct EditorPage {
     this.userScale = newScale;
     this.pinchBase = newScale;
     this.clampOffset();
+    console.info(`zoomAt done: offset=(${this.offsetX},${this.offsetY})`);
   }
 
   private resetZoom(): void {
@@ -831,7 +833,6 @@ export struct EditorPage {
 
   private onCanvasAxis(event: AxisEvent): void {
     if (this.isFilling || this.isBusy) return;
-
     if (event.hasAxis(AxisType.PINCH_AXIS)) {
       const pinch = event.getPinchAxisScaleValue();
       if (pinch > 0) {
@@ -841,9 +842,28 @@ export struct EditorPage {
     }
 
     const v = event.getVerticalAxisValue();
-    if (v === 0) return;
-    const factor = v > 0 ? 1.1 : 0.9;
-    this.zoomAt(event.x, event.y, factor);
+    const h = event.getHorizontalAxisValue();
+    if (v === 0 && h === 0) return;
+
+    try {
+      if(event.getModifierKeyState) {
+        const ctrlPressed: boolean = event.getModifierKeyState(['Ctrl']);
+        if (ctrlPressed) {
+          if (v === 0) return;
+          const factor = v > 0 ? 1.05 : 0.95;
+          this.zoomAt(this.outerW / 2, this.outerH / 2, factor);
+          return;
+        }
+      }
+    }
+    catch(err){
+      console.error('无法getModifierKeyState');
+    }
+
+    const SCROLL_STEP = 0.5;
+    this.offsetX -= h * SCROLL_STEP;
+    this.offsetY -= v * SCROLL_STEP;
+    this.clampOffset();
   }
 
   private readCanvasRegion(
@@ -1953,6 +1973,7 @@ export struct EditorPage {
               })
               .onTouch((e: TouchEvent) => this.onCanvasTouch(e))
               .onMouse((e: MouseEvent) => this.onCanvasMouse(e))
+              .hitTestBehavior(HitTestMode.Transparent)
           }
           .width(px2vp(this.canvasW))
           .height(px2vp(this.canvasH))
@@ -1966,7 +1987,8 @@ export struct EditorPage {
           .gesture(
             GestureGroup(GestureMode.Parallel,
               PinchGesture()
-                .onActionStart(() => {
+                .onActionStart((e:GestureEvent) => {
+                  if(e.sourceTool != SourceTool.Finger) return;
                   this.isPinching = true;
                   this.isPanning = false;
                   this.showPickerPreview = false;
@@ -1974,17 +1996,20 @@ export struct EditorPage {
                 })
                 .onActionUpdate((e: GestureEvent) => {
                   if (e) {
+                    if(e.sourceTool != SourceTool.Finger) return;
                     this.userScale = this.clampScale(this.pinchBase * e.scale);
                     this.clampOffset();
                   }
                 })
-                .onActionEnd(() => {
+                .onActionEnd((e:GestureEvent) => {
+                  if(e.sourceTool != SourceTool.Finger) return;
                   this.pinchBase = this.userScale;
                   this.isPinching = false;
                   this.clampOffset();
                 }),
               PanGesture({ fingers: 2 })
-                .onActionStart(() => {
+                .onActionStart((e:GestureEvent) => {
+                  if(e.sourceTool != SourceTool.Finger) return;
                   this.isPinching = true;
                   this.isPanning = false;
                   this.showPickerPreview = false;
@@ -1994,12 +2019,14 @@ export struct EditorPage {
                 })
                 .onActionUpdate((e: GestureEvent) => {
                   if (e) {
+                    if(e.sourceTool != SourceTool.Finger) return;
                     this.offsetX = this.panBaseX + e.offsetX;
                     this.offsetY = this.panBaseY + e.offsetY;
                     this.clampOffset();
                   }
                 })
-                .onActionEnd(() => {
+                .onActionEnd((e:GestureEvent) => {
+                  if(e.sourceTool != SourceTool.Finger) return;
                   this.panBaseX = this.offsetX;
                   this.panBaseY = this.offsetY;
                   this.isPinching = false;
