@@ -1,7 +1,7 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { CustomColors, ThemeControl, window } from '@kit.ArkUI';
-import { deviceInfo } from '@kit.BasicServicesKit';
+import { deviceInfo, SuppressWarnings, SuppressWarningsType } from '@kit.BasicServicesKit';
 
 const DOMAIN = 0x0000;
 
@@ -25,7 +25,7 @@ export default class EntryAbility extends UIAbility {
   private mainWindow: window.Window | null = null;
   private isTerminating: boolean = false;
 
-  onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+  onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
   }
 
@@ -33,6 +33,7 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
 
+  @SuppressWarnings({ rules: [SuppressWarningsType.SYSCAP] })
   onWindowStageCreate(windowStage: window.WindowStage): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
@@ -60,11 +61,22 @@ export default class EntryAbility extends UIAbility {
       .then((win) => {
         this.mainWindow = win;
 
-        const rect = win.getWindowProperties().windowRect;
-        const w = px2vp(rect.width);
-        const h = px2vp(rect.height);
-        AppStorage.setOrCreate('windowWidth', w);
-        AppStorage.setOrCreate('windowHeight', h);
+        try {
+          const rect = win.getWindowProperties().windowRect;
+          const w = px2vp(rect.width);
+          const h = px2vp(rect.height);
+          AppStorage.setOrCreate('windowWidth', w);
+          AppStorage.setOrCreate('windowHeight', h);
+        } catch (error) {
+          console.error('无法getWindowProperties，使用默认值');
+          AppStorage.setOrCreate('windowWidth', 1280);
+          AppStorage.setOrCreate('windowHeight', 720);
+        }
+
+        win.setWindowLimits({
+          minWidth: 640,
+          minHeight: 640
+        }).catch(() => console.log('无法setWindowLimits'));
 
         win.on('windowSizeChange', (data: window.Size) => {
           AppStorage.set('windowWidth', px2vp(data.width));
@@ -144,29 +156,33 @@ export default class EntryAbility extends UIAbility {
         resolve(v);
       };
 
-      this.mainWindow.getUIContext().showAlertDialog({
-        title: '保存更改',
-        message: '当前画板有未保存的修改，是否保存后退出？',
-        buttons: [
-          {
-            value: '保存并退出',
-            primary:true,
-            backgroundColor:$r('app.color.brand'),
-            fontColor:Color.White,
-            action: () => done('save')
-          },
-          {
-            value: '不保存退出',
-            fontColor: $r('sys.color.warning'),
-            action: () => done('discard')
-          },
-          {
-            value: '取消',
-            action: () => done('cancel')
-          }
-        ],
-        buttonDirection: DialogButtonDirection.AUTO
-      });
+      try {
+        this.mainWindow.getUIContext().showAlertDialog({
+          title: '保存更改',
+          message: '当前画板有未保存的修改，是否保存后退出？',
+          buttons: [
+            {
+              value: '保存并退出',
+              primary: true,
+              backgroundColor: $r('app.color.brand'),
+              fontColor: Color.White,
+              action: () => done('save')
+            },
+            {
+              value: '不保存退出',
+              fontColor: $r('sys.color.warning'),
+              action: () => done('discard')
+            },
+            {
+              value: '取消',
+              action: () => done('cancel')
+            }
+          ],
+          buttonDirection: DialogButtonDirection.AUTO
+        });
+      } catch (error) {
+        console.error('无法window.Window.getUIContext');
+      }
     });
   }
 

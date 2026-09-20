@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { componentSnapshot, LengthMetrics, promptAction } from '@kit.ArkUI';
+import { componentSnapshot, LengthMetrics, promptAction, uiMaterial } from '@kit.ArkUI';
 import {
   HdsNavigation, hdsMaterial, ScrollEffectType, TextStyleMode,
   HdsNavigationTitleMode
@@ -22,6 +22,7 @@ import { uniformTypeDescriptor, uniformDataStruct } from '@kit.ArkData';
 import { ImageOverlayPage, ImageOverlayParam } from './ImageOverlayPage';
 import { TextPage, TextParam } from './TextPage';
 import { deviceInfo } from '@kit.BasicServicesKit';
+import { systemShare } from '@kit.ShareKit';
 
 type SortBy = 'time' | 'name';
 type ViewMode = 'list' | 'grid';
@@ -64,6 +65,10 @@ class ProjectDataSource implements IDataSource {
   getAllNames(): string[] {
     return this.projects.map((p: DrawProject) => p.name);
   }
+
+  getAllIds(): string[] {
+    return this.projects.map((p: DrawProject) => p.id);
+  }
 }
 
 @Entry
@@ -81,6 +86,13 @@ struct Index {
   @State contextMenuProject: DrawProject | null = null;
   @State draggingProjectId: string = '';
 
+  @State isMultiSelecting: boolean = false;
+  @State selectedIds: Set<string> = new Set<string>();
+
+  // ===== 搜索 =====
+  @State searchText: string = '';
+  private allProjects: DrawProject[] = [];
+
   private privacyVM: PrivacyConsentVM = new PrivacyConsentVM();
 
   @StorageProp('windowWidth') windowWidth: number = 0;
@@ -92,7 +104,7 @@ struct Index {
   private newProjectDialogController: CustomDialogController | null = null;
   private renameDialogController: CustomDialogController | null = null;
   private scroller: Scroller = new Scroller();
-  private gridscroller:Scroller = new Scroller();
+  private gridscroller: Scroller = new Scroller();
 
   onProjectsChanged(): void {
     this.loadProjects();
@@ -223,7 +235,7 @@ struct Index {
   }
 
   private showPermissionInfo(): void {
-    AlertDialog.show({
+    this.getUIContext().showAlertDialog({
       title: '权限使用说明',
       message: '竹子画板不申请任何需要您手动授权的系统权限。\n\n' +
         '基于安全访问机制，竹子画板只能访问你主动选择的图片，看不到相册里的其他内容。\n\n' +
@@ -250,14 +262,36 @@ struct Index {
 
   private toggleSort(): void {
     this.sortBy = this.sortBy === 'time' ? 'name' : 'time';
-    this.loadProjects();
+    this.applyFilterAndSort();
   }
 
   async loadProjects(): Promise<void> {
-    const list = await ProjectStore.list();
-    const sorted = this.sortProjects(list, this.sortBy);
-    this.dataSource.setProjects(sorted);
-    this.projectCount = sorted.length;
+    this.allProjects = await ProjectStore.list();
+    this.applyFilterAndSort();
+  }
+
+  private applyFilterAndSort(): void {
+    const sorted = this.sortProjects(this.allProjects, this.sortBy);
+    const keyword = this.searchText.trim().toLowerCase();
+    const filtered = keyword
+      ? sorted.filter((p: DrawProject) => p.name.toLowerCase().includes(keyword))
+      : sorted;
+
+    this.dataSource.setProjects(filtered);
+    this.projectCount = filtered.length;
+
+    if (this.isMultiSelecting) {
+      if (filtered.length === 0) {
+        this.exitMultiSelect();
+      } else {
+        const valid = new Set<string>(filtered.map((p: DrawProject) => p.id));
+        const next = new Set<string>();
+        this.selectedIds.forEach((id: string) => {
+          if (valid.has(id)) next.add(id);
+        });
+        this.selectedIds = next;
+      }
+    }
   }
 
   openProject(project: DrawProject): void {
@@ -274,6 +308,113 @@ struct Index {
       return '';
     }
     return '';
+  }
+
+  private isSelected(id: string): boolean {
+    return this.selectedIds.has(id);
+  }
+
+  private toggleSelect(id: string): void {
+    const next = new Set<string>(this.selectedIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    this.selectedIds = next;
+  }
+
+  private exitMultiSelect(): void {
+    this.isMultiSelecting = false;
+    this.selectedIds = new Set<string>();
+  }
+
+  private toggleSelectAll(): void {
+    const total = this.dataSource.totalCount();
+    if (total > 0 && this.selectedIds.size === total) {
+      this.selectedIds = new Set<string>();
+    } else {
+      this.selectedIds = new Set<string>(this.dataSource.getAllIds());
+    }
+  }
+
+  private deleteSelected(): void {
+    const count = this.selectedIds.size;
+    if (count === 0) {
+      promptAction.openToast({ message: '请先选择项目' }).catch(() => {});
+      return;
+    }
+    AlertDialog.show({
+      title: '确认删除',
+      message: `确定要删除选中的 ${count} 个项目吗？`,
+      buttons: [
+        { value: '取消', action: () => {}, fontColor: $r('app.color.brand') },
+        {
+          value: '确定',
+          fontColor: $r('sys.color.warning'),
+          action: async () => {
+            const ids = Array.from(this.selectedIds);
+            for (const id of ids) {
+              try {
+                await ProjectStore.remove(id);
+              } catch (e) {
+                console.warn(`删除失败: ${id}`, e);
+              }
+            }
+            this.exitMultiSelect();
+            await this.loadProjects();
+            promptAction.openToast({ message: `已删除 ${ids.length} 个项目` }).catch(() => {});
+          }
+        }
+      ]
+    });
+  }
+
+  private async shareSelected(): Promise<void> {
+    const selectedProjects: DrawProject[] = [];
+    for (let i = 0; i < this.dataSource.totalCount(); i++) {
+      const p = this.dataSource.getData(i);
+      if (this.selectedIds.has(p.id)) {
+        selectedProjects.push(p);
+      }
+    }
+
+    if (selectedProjects.length === 0) {
+      promptAction.openToast({ message: '请先选择要分享的项目' }).catch(() => {});
+      return;
+    }
+
+    const records: systemShare.SharedRecord[] = [];
+    for (const project of selectedProjects) {
+      const imagePath = ProjectStore.getImagePath(project.id);
+      const uri = fileUri.getUriFromPath(imagePath);
+      records.push({
+        utd: uniformTypeDescriptor.UniformDataType.IMAGE,
+        uri: uri,
+        title: project.name,
+        label: '图片'
+      });
+    }
+
+    const data = new systemShare.SharedData(records[0]);
+    for (let i = 1; i < records.length; i++) {
+      try {
+        data.addRecord(records[i]);
+      } catch (err) {
+        console.error('addRecord失败: ', err);
+      }
+    }
+
+    const controller = new systemShare.ShareController(data);
+    try {
+      await controller.show(this.context, {
+        selectionMode: systemShare.SelectionMode.BATCH
+      });
+      this.exitMultiSelect();
+    } catch (e) {
+      console.error('拉起分享面板失败:', e);
+      promptAction.openToast({ message: '分享失败' }).catch(() => {});
+    }
   }
 
   async generateMissingThumbs(): Promise<void> {
@@ -332,7 +473,8 @@ struct Index {
   createProject(): void {
     this.newProjectDialogController = new CustomDialogController({
       builder: NewProjectDialog({
-        existingNames: this.dataSource.getAllNames(),
+        // ===== 搜索 =====：使用完整列表校验重名，避免搜索状态漏判
+        existingNames: this.allProjects.map((p: DrawProject) => p.name),
         onConfirm: async (name: string, w: number, h: number) => {
           const id = Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
           const project: DrawProject = {
@@ -358,7 +500,8 @@ struct Index {
     this.renameDialogController = new CustomDialogController({
       builder: RenameProjectDialog({
         currentName: project.name,
-        existingNames: this.dataSource.getAllNames(),
+        // ===== 搜索 =====：同样用完整列表校验重名
+        existingNames: this.allProjects.map((p: DrawProject) => p.name),
         onConfirm: async (newName: string) => {
           await this.doRename(project, newName);
         }
@@ -440,7 +583,8 @@ struct Index {
     if (!uris || uris.length === 0) return 0;
     let successCount = 0;
 
-    const usedNames = new Set<string>(this.dataSource.getAllNames());
+    // ===== 搜索 =====：用完整列表判重名
+    const usedNames = new Set<string>(this.allProjects.map((p: DrawProject) => p.name));
 
     for (const sourceUri of uris) {
       try {
@@ -655,14 +799,14 @@ struct Index {
   @Builder
   EmptyState() {
     Column() {
-      SymbolGlyph($r('sys.symbol.paintpalette'))
+      SymbolGlyph($r(this.searchText.trim() ? 'sys.symbol.magnifyingglass' : 'sys.symbol.paintpalette'))
         .fontSize(64)
         .fontColor([$r('sys.color.font_tertiary')])
-      Text('还没有项目')
+      Text(this.searchText.trim() ? '没有找到匹配的项目' : '还没有项目')
         .fontSize(18)
         .fontColor($r('sys.color.font_primary'))
         .margin({ top: 16 })
-      Text('点击右上角 + 创建新项目')
+      Text(this.searchText.trim() ? '试试其他关键词' : '点击右上角 + 创建新项目')
         .fontSize(14)
         .fontColor($r('sys.color.font_secondary'))
         .margin({ top: 8 })
@@ -674,23 +818,83 @@ struct Index {
   }
 
   @Builder
+  buildSearchBar(): void {
+    if (!this.isMultiSelecting && this.allProjects.length > 0) {
+      Column() {
+        if(deviceInfo.apiAvailable('26.0.0')) {
+          Search({
+            value: $$this.searchText,
+            placeholder: '搜索...'
+          })
+            .backgroundColor($r('sys.color.background_tertiary'))
+            .placeholderColor($r('sys.color.font_secondary'))
+            .placeholderFont({ size: 14 })
+            .textFont({ size: 14 })
+            .onChange((value: string) => {
+              if (value.trim() === '') {
+                this.applyFilterAndSort();
+              }
+            })
+            .onSubmit((_value: string) => {
+              this.applyFilterAndSort();
+            })
+            .systemMaterial(new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN }))
+            .width('100%')
+        }else{
+          Search({
+            value: $$this.searchText,
+            placeholder: '搜索...'
+          })
+            .backgroundColor($r('sys.color.background_tertiary'))
+            .placeholderColor($r('sys.color.font_secondary'))
+            .placeholderFont({ size: 14 })
+            .textFont({ size: 14 })
+            .onChange((value: string) => {
+              if (value.trim() === '') {
+                this.applyFilterAndSort();
+              }
+            })
+            .onSubmit((_value: string) => {
+              this.applyFilterAndSort();
+            })
+            .width('100%')
+        }
+      }
+      .padding({left:16,right:16})
+      .width('100%')
+    }
+  }
+
+  @Builder
   projectContextMenu(): void {
-    Menu() {
-      MenuItem({ content: '重命名' })
-        .onClick(() => {
-          if (this.contextMenuProject) this.showRenameDialog(this.contextMenuProject);
-        })
-      MenuItem({ content: '删除' })
-        .onClick(() => {
-          if (this.contextMenuProject) this.deleteProject(this.contextMenuProject);
-        })
-        .contentFontColor($r('sys.color.warning'))
+    if (!this.isMultiSelecting) {
+      Menu() {
+        MenuItem({ content: '重命名' })
+          .onClick(() => {
+            if (this.contextMenuProject) this.showRenameDialog(this.contextMenuProject);
+          })
+        MenuItem({ content: '删除' })
+          .onClick(() => {
+            if (this.contextMenuProject) this.deleteProject(this.contextMenuProject);
+          })
+          .contentFontColor($r('sys.color.warning'))
+      }
     }
   }
 
   @Builder
   ProjectListCard(project: DrawProject) {
     Row() {
+      if (this.isMultiSelecting) {
+        Checkbox()
+          .select(this.isSelected(project.id))
+          .selectedColor($r('app.color.brand'))
+          .width(22)
+          .height(22)
+          .margin({ right: 8 })
+          .hitTestBehavior(HitTestMode.None)
+      }
+
       Image(this.getThumbUri(project.id))
         .width(48)
         .height(48)
@@ -717,27 +921,37 @@ struct Index {
       .alignItems(HorizontalAlign.Start)
       .padding({ left: 12 })
 
-      Button() {
-        SymbolGlyph($r('sys.symbol.dot_grid_1x2'))
-          .fontSize(24)
-          .fontColor([$r('sys.color.font_primary')])
+      if (!this.isMultiSelecting) {
+        Button() {
+          SymbolGlyph($r('sys.symbol.dot_grid_1x2'))
+            .fontSize(24)
+            .fontColor([$r('sys.color.font_primary')])
+        }
+        .buttonStyle(ButtonStyleMode.TEXTUAL)
+        .width(40)
+        .height(40)
+        .bindMenu([
+          { value: '重命名', action: () => this.showRenameDialog(project) },
+          { value: '删除', action: () => this.deleteProject(project) }
+        ], getMenuOptions())
+        .draggable(false)
       }
-      .buttonStyle(ButtonStyleMode.TEXTUAL)
-      .width(40)
-      .height(40)
-      .bindMenu([
-        { value: '重命名', action: () => this.showRenameDialog(project) },
-        { value: '删除', action: () => this.deleteProject(project) }
-      ], getMenuOptions())
-      .draggable(false)
     }
     .width('100%')
     .padding(12)
     .backgroundColor($r('app.color.listitem'))
     .borderRadius(12)
+    .border({
+      width: (this.isMultiSelecting && this.isSelected(project.id)) ? 2 : 0,
+      color: $r('app.color.brand'),
+      radius: 12
+    })
     .hoverEffect(HoverEffect.Highlight)
-    .draggable(true)
+    .draggable(!this.isMultiSelecting)
     .onDragStart((event: DragEvent) => {
+      if (this.isMultiSelecting) {
+        return {} as DragItemInfo;
+      }
       this.draggingProjectId = project.id;
       this.buildDragData(event, project);
       try {
@@ -752,10 +966,15 @@ struct Index {
       this.draggingProjectId = '';
     })
     .onClick(() => {
+      if (this.isMultiSelecting) {
+        this.toggleSelect(project.id);
+        return;
+      }
       if (this.draggingProjectId === project.id) return;
       this.openProject(project);
     })
     .onMouse((event: MouseEvent) => {
+      if (this.isMultiSelecting) return;
       if (event.button === MouseButton.Right) {
         this.contextMenuProject = project;
       }
@@ -766,16 +985,29 @@ struct Index {
   @Builder
   ProjectGridCard(project: DrawProject) {
     Column({ space: 8 }) {
-      Image(this.getThumbUri(project.id))
-        .width('100%')
-        .aspectRatio(1)
-        .borderRadius(12)
-        .objectFit(ImageFit.Cover)
-        .backgroundColor($r('sys.color.background_tertiary'))
-        .alt($r('app.media.startIcon'))
-        .draggable(false)
-        .id(`thumb_${project.id}`)
-        .interpolation(ImageInterpolation.Low)
+      Stack({ alignContent: Alignment.BottomEnd }) {
+        Image(this.getThumbUri(project.id))
+          .width('100%')
+          .aspectRatio(1)
+          .borderRadius(12)
+          .objectFit(ImageFit.Cover)
+          .backgroundColor($r('sys.color.background_tertiary'))
+          .alt($r('app.media.startIcon'))
+          .draggable(false)
+          .id(`thumb_${project.id}`)
+          .interpolation(ImageInterpolation.Low)
+
+        if (this.isMultiSelecting) {
+          Checkbox()
+            .select(this.isSelected(project.id))
+            .selectedColor($r('app.color.brand'))
+            .width(22)
+            .height(22)
+            .margin({ right: 8, bottom: 8 })
+            .hitTestBehavior(HitTestMode.None)
+        }
+      }
+      .width('100%')
 
       Text(project.name)
         .fontSize(14)
@@ -789,9 +1021,17 @@ struct Index {
     .padding(8)
     .backgroundColor($r('app.color.listitem'))
     .borderRadius(12)
+    .border({
+      width: (this.isMultiSelecting && this.isSelected(project.id)) ? 2 : 0,
+      color: $r('app.color.brand'),
+      radius: 12
+    })
     .hoverEffect(HoverEffect.Highlight)
-    .draggable(true)
+    .draggable(!this.isMultiSelecting)
     .onDragStart((event: DragEvent) => {
+      if (this.isMultiSelecting) {
+        return {} as DragItemInfo;
+      }
       this.draggingProjectId = project.id;
       this.buildDragData(event, project);
       try {
@@ -806,15 +1046,21 @@ struct Index {
       this.draggingProjectId = '';
     })
     .onClick(() => {
+      if (this.isMultiSelecting) {
+        this.toggleSelect(project.id);
+        return;
+      }
       if (this.draggingProjectId === project.id) return;
       this.openProject(project);
     })
     .onTouch((e: TouchEvent) => {
+      if (this.isMultiSelecting) return;
       if (e.type === TouchType.Down) {
         this.contextMenuProject = project;
       }
     })
     .onMouse((event: MouseEvent) => {
+      if (this.isMultiSelecting) return;
       if (event.button === MouseButton.Right) {
         this.contextMenuProject = project;
       }
@@ -898,15 +1144,15 @@ struct Index {
   }
 
   build() {
-    HdsNavigation(this.pathStack) {
-      Column()
-        .width(0)
-        .height(0)
-        .bindSheet($$this.isShowingAbout, this.buildAbout, {
-          detents: [SheetSize.LARGE], dragBar: false, preferType: SheetType.CENTER
-        })
-      Column() {
-        if (!this.isShowingPrivacy) {
+    if(!this.isShowingPrivacy) {
+      HdsNavigation(this.pathStack) {
+        Column()
+          .width(0)
+          .height(0)
+          .bindSheet($$this.isShowingAbout, this.buildAbout, {
+            detents: [SheetSize.LARGE], dragBar: false, preferType: SheetType.CENTER
+          })
+        Column() {
           if (this.projectCount === 0) {
             this.EmptyState()
           } else if (this.viewMode === 'grid') {
@@ -915,127 +1161,203 @@ struct Index {
             this.ProjectList()
           }
         }
+        .clip(false)
+        .width('100%')
+        .height('100%')
+        .backgroundColor($r('sys.color.background_secondary'))
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+        .border({
+          width: this.isDragHover ? (this.draggingProjectId == '' ? 2 : 0) : 0,
+          color: $r('app.color.brand'),
+          radius: 12
+        })
+        .allowDrop(this.draggingProjectId == '' ? [uniformTypeDescriptor.UniformDataType.IMAGE] : [])
+        .onDragEnter(() => {
+          this.isDragHover = true;
+        })
+        .onDragLeave(() => {
+          this.isDragHover = false;
+        })
+        .onDrop((event: DragEvent) => {
+          this.isDragHover = false;
+          this.handleImageDrop(event);
+        })
+        .bindSheet($$this.isShowingPrivacy, this.buildPrivacy, {
+          detents: [SheetSize.LARGE],
+          dragBar: false,
+          showClose: false,
+          preferType: SheetType.CENTER,
+          onWillDismiss: (action: DismissSheetAction) => {
+            if (action.reason === DismissReason.PRESS_BACK) {
+              this.privacyVM.onReject();
+              return;
+            }
+          }
+        })
       }
-      .clip(false)
-      .width('100%')
-      .height('100%')
-      .backgroundColor($r('sys.color.background_secondary'))
-      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .border({
-        width: this.isDragHover ? (this.draggingProjectId == '' ? 2 : 0) : 0,
-        color: $r('app.color.brand'),
-        radius: 12
-      })
-      .allowDrop(this.draggingProjectId == '' ? [uniformTypeDescriptor.UniformDataType.IMAGE] : [])
-      .onDragEnter(() => {
-        this.isDragHover = true;
-      })
-      .onDragLeave(() => {
-        this.isDragHover = false;
-      })
-      .onDrop((event: DragEvent) => {
-        this.isDragHover = false;
-        this.handleImageDrop(event);
-      })
-      .bindSheet($$this.isShowingPrivacy, this.buildPrivacy, {
+      .bindSheet($$this.isShowingFullPrivacy, this.buildFullPrivacy, {
         detents: [SheetSize.LARGE],
         dragBar: false,
-        showClose: false,
-        preferType: SheetType.CENTER,
-        onWillDismiss: (action: DismissSheetAction) => {
-          if (action.reason === DismissReason.PRESS_BACK) {
-            this.privacyVM.onReject();
-            return;
+        preferType: SheetType.CENTER
+      })
+      .mode(NavigationMode.Stack)
+      .navDestination(this.PageMap)
+      .titleBar({
+        content: {
+          title: {
+            mainTitle: this.isMultiSelecting
+              ? `已选择 ${this.selectedIds.size} 项`
+              : $r('app.string.EntryAbility_label')
+          },
+          backIcon: this.isMultiSelecting ? {
+            isEnabled: true,
+            label: '取消',
+            icon: $r('sys.symbol.xmark'),
+            action: () => {
+              this.exitMultiSelect();
+            }
+          } : undefined,
+          menu: this.isMultiSelecting ? {
+            value: [
+              {
+                content: {
+                  label: (this.projectCount > 0 && this.selectedIds.size === this.projectCount)
+                    ? '取消全选' : '全选',
+                  icon: $r('sys.symbol.checkmark_square_on_square'),
+                  action: () => {
+                    this.toggleSelectAll();
+                  }
+                }
+              },
+              {
+                content: {
+                  label: '删除',
+                  icon: $r('sys.symbol.trash'),
+                  action: () => {
+                    this.deleteSelected();
+                  }
+                }
+              },
+              {
+                content: {
+                  label: '分享',
+                  icon: $r('sys.symbol.share'),
+                  action: () => {
+                    this.shareSelected();
+                  }
+                }
+              }
+            ],
+            maxCount: 3
+          } : {
+            value: [
+              {
+                content: {
+                  label: '新建项目',
+                  icon: $r('sys.symbol.plus'),
+                  action: () => this.createProject()
+                }
+              },
+              {
+                content: {
+                  label: this.sortBy === 'time' ? '按时间' : '按名称',
+                  icon: this.sortBy === 'time' ? $r('sys.symbol.clock') : $r('sys.symbol.textformat'),
+                  action: () => this.toggleSort(),
+                  type: TextStyleMode.NORMAL
+                }
+              },
+              {
+                content: {
+                  label: this.viewMode === 'list' ? '宫格视图' : '列表视图',
+                  icon: this.viewMode === 'list' ? $r('sys.symbol.list_bullet') : $r('sys.symbol.square_grid_2x2'),
+                  action: () => this.toggleView()
+                }
+              },
+              {
+                content: {
+                  label: '导入图片',
+                  icon: $r('sys.symbol.picture'),
+                  action: () => this.importPng()
+                }
+              },
+              {
+                content: {
+                  label: '多选',
+                  icon: $r('sys.symbol.checkmark_square_on_square'),
+                  action: () => {
+                    if (this.searchText !== '') {
+                      this.searchText = '';
+                      this.applyFilterAndSort();
+                    }
+                    this.selectedIds = new Set<string>();
+                    this.isMultiSelecting = true;
+                  }
+                }
+              },
+              {
+                content: {
+                  label: '关于',
+                  icon: $r('sys.symbol.info_circle'),
+                  action: () => {
+                    this.isShowingAbout = true;
+                  }
+                }
+              }
+            ],
+            maxCount: this.windowWidth >= 840 ? 5 : (this.windowWidth >= 500 ? 4 : 3)
+          },
+          bottomBuilder: this.isMultiSelecting ? undefined : {
+            builder: () => this.buildSearchBar()
+          }
+        },
+        enableComponentSafeArea: true,
+        style: {
+          scrollEffectOpts: {
+            enableScrollEffect: true,
+            scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
+            blurEffectiveStartOffset: LengthMetrics.vp(0),
+            blurEffectiveEndOffset: LengthMetrics.vp(28)
+          },
+          originalStyle: {
+            backgroundStyle: {
+              backgroundColor: Color.Transparent
+            },
+            contentStyle: {
+              titleStyle: {
+                mainTitleColor: $r('sys.color.font_primary')
+              },
+              menuStyle: {
+                iconColor: $r('sys.color.font_primary'),
+                textColor: $r('sys.color.font_primary'),
+                backgroundColor: deviceInfo.apiAvailable('26.0.0') ?
+                  undefined : $r('sys.color.background_tertiary')
+              },
+              backIconStyle: {
+                iconColor: $r('sys.color.font_primary'),
+                textColor: $r('sys.color.font_primary'),
+                backgroundColor: deviceInfo.apiAvailable('26.0.0') ?
+                  undefined : $r('sys.color.background_tertiary')
+              }
+            }
+          },
+          systemMaterialEffect: {
+            materialType: hdsMaterial.MaterialType.ADAPTIVE,
+            materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
           }
         }
       })
+      .titleMode(deviceInfo.deviceType == deviceInfo.DeviceTypes.TYPE_2IN1 ? HdsNavigationTitleMode.MINI :
+        (this.isMultiSelecting ? HdsNavigationTitleMode.MINI : HdsNavigationTitleMode.FREE))
+      .hideBackButton(!this.isMultiSelecting)
+      .bindToScrollable([this.scroller, this.gridscroller])
+      .backgroundColor($r('sys.color.background_secondary'))
     }
-    .bindSheet($$this.isShowingFullPrivacy, this.buildFullPrivacy, {
-      detents: [SheetSize.LARGE],
-      dragBar: false,
-      preferType: SheetType.CENTER
-    })
-    .mode(NavigationMode.Stack)
-    .navDestination(this.PageMap)
-    .titleBar({
-      content: {
-        title: {
-          mainTitle: $r('app.string.EntryAbility_label')
-        },
-        menu: {
-          value: [
-            {
-              content: {
-                label: '新建项目',
-                icon: $r('sys.symbol.plus'),
-                action: () => this.createProject()
-              }
-            },
-            {
-              content: {
-                label: this.sortBy === 'time' ? '按时间' : '按名称',
-                icon: this.sortBy === 'time' ? $r('sys.symbol.clock') : $r('sys.symbol.textformat'),
-                action: () => this.toggleSort(),
-                type: TextStyleMode.NORMAL
-              }
-            },
-            {
-              content: {
-                label: this.viewMode === 'list' ? '宫格视图' : '列表视图',
-                icon: this.viewMode === 'list' ? $r('sys.symbol.grid') : $r('sys.symbol.list_bullet'),
-                action: () => this.toggleView()
-              }
-            },
-            {
-              content: {
-                label: '导入图片',
-                icon: $r('sys.symbol.picture'),
-                action: () => this.importPng()
-              }
-            },
-            {
-              content: {
-                label: '关于',
-                icon: $r('sys.symbol.info_circle'),
-                action: () => {
-                  this.isShowingAbout = true;
-                }
-              }
-            }
-          ]
-        }
-      },
-      enableComponentSafeArea: true,
-      style: {
-        scrollEffectOpts: {
-          enableScrollEffect: true,
-          scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
-          blurEffectiveStartOffset: LengthMetrics.vp(0),
-          blurEffectiveEndOffset: LengthMetrics.vp(28)
-        },
-        originalStyle: {
-          backgroundStyle: {
-            backgroundColor: Color.Transparent
-          },
-          contentStyle: {
-            titleStyle: {
-              mainTitleColor: $r('sys.color.font_primary')
-            },
-            menuStyle: {
-              iconColor: $r('sys.color.font_primary'),
-              textColor: $r('sys.color.font_primary')
-            }
-          }
-        },
-        systemMaterialEffect: {
-          materialType: hdsMaterial.MaterialType.ADAPTIVE,
-          materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
-        }
-      }
-    })
-    .titleMode(deviceInfo.deviceType == deviceInfo.DeviceTypes.TYPE_2IN1 ? HdsNavigationTitleMode.MINI : HdsNavigationTitleMode.FREE)
-    .hideBackButton(true)
-    .bindToScrollable([this.scroller,this.gridscroller])
-    .backgroundColor($r('sys.color.background_secondary'))
+    else {
+      Column() {}
+        .width('100%')
+        .height('100%')
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+        .backgroundColor($r('sys.color.background_secondary'))
+    }
   }
 }
