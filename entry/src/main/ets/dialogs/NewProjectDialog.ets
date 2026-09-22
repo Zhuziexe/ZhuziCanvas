@@ -67,6 +67,7 @@ export struct NewProjectDialog {
         .width('100%')
 
       TextInput({ placeholder: '项目名称', text: this.name })
+        .defaultFocus(true)
         .onChange((v: string) => {
           this.name = v;
         })

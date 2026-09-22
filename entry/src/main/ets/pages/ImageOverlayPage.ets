@@ -4,6 +4,7 @@ import { taskpool } from '@kit.ArkTS';
 import { promptAction } from '@kit.ArkUI';
 import { ProjectStore, DrawProject } from '../common/ProjectStore';
 import { hdsMaterial, HdsNavDestination } from '@kit.UIDesignKit';
+import { KeyCode } from '@kit.InputKit';
 
 export interface ImageOverlayParam {
   project: DrawProject;
@@ -69,12 +70,12 @@ export struct ImageOverlayPage {
   };
   @Prop overlayUri: string = '';
 
-  @State offsetX: number = 0;      // 画板像素坐标下的偏移
+  @State offsetX: number = 0;
   @State offsetY: number = 0;
   @State overlayScale: number = 1;
   @State overlayW: number = 0;
   @State overlayH: number = 0;
-  @State displayScale: number = 1; // 画板 vp -> 屏幕 vp
+  @State displayScale: number = 1;
   @State containerW: number = 0;
   @State containerH: number = 0;
   @State overlayReady: boolean = false;
@@ -200,6 +201,39 @@ export struct ImageOverlayPage {
       if (packer) { try { await packer.release(); } catch {} }
       if (pm) { try { await pm.release(); } catch {} }
     }
+  }
+
+  private handleArrowKey(event: KeyEvent): void {
+    if (event.type !== KeyType.Down) return;
+    if (!this.overlayReady) return;
+
+    const ds = this.displayScale > 0 ? this.displayScale : 1;
+    let step = vp2px(1) / ds;
+    try {
+      if (event.getModifierKeyState && event.getModifierKeyState(['Shift'])) {
+        step *= 10;
+      }
+    }catch(err){
+      console.error('无法getModifierKeyState')
+    }
+
+    switch (event.keyCode) {
+      case KeyCode.KEYCODE_DPAD_LEFT:
+        this.offsetX -= step;
+        break;
+      case KeyCode.KEYCODE_DPAD_RIGHT:
+        this.offsetX += step;
+        break;
+      case KeyCode.KEYCODE_DPAD_UP:
+        this.offsetY -= step;
+        break;
+      case KeyCode.KEYCODE_DPAD_DOWN:
+        this.offsetY += step;
+        break;
+      default:
+        return;
+    }
+    event.stopPropagation();
   }
 
   private async updateThumb(buf: ArrayBuffer, w: number, h: number): Promise<void> {
@@ -345,12 +379,92 @@ export struct ImageOverlayPage {
                 this.panBaseY = this.offsetY;
               })
           )
+          .focusable(true)
+          .focusOnTouch(true)
+          .id('overlayImage')
+          .onKeyEvent((event: KeyEvent) => {
+            this.handleArrowKey(event);
+          })
+          .onAppear(() => {
+            setTimeout(() => {
+              try {
+                this.getUIContext()
+                  .getFocusController()
+                  .requestFocus('overlayImage');
+              } catch (error) {
+                console.error(`无法requestFocus: ${error}`)
+              }
+            }, 50);
+          })
       }
     }
     .width(px2vp(this.project.width) * this.displayScale)
     .height(px2vp(this.project.height) * this.displayScale)
     .clip(true)
     .backgroundColor($r('sys.color.background_tertiary'))
+  }
+
+  @Builder
+  buildControls(): void {
+    Column({ space: 16 }) {
+      Row({ space: 12 }) {
+        Text('大小')
+          .fontSize(14)
+          .fontColor($r('sys.color.font_secondary'))
+          .width(40)
+        Slider({
+          min: 10,
+          max: 500,
+          value: Math.round(this.overlayScale * 100),
+          step: 1,
+          style: SliderStyle.InSet
+        })
+          .selectedColor($r('app.color.brand'))
+          .layoutWeight(1)
+          .onChange((v: number) => {
+            const newScale = v / 100;
+            const oldDw = this.overlayW * this.overlayScale;
+            const oldDh = this.overlayH * this.overlayScale;
+            const cx = this.offsetX + oldDw / 2;
+            const cy = this.offsetY + oldDh / 2;
+            this.overlayScale = newScale;
+            const newDw = this.overlayW * newScale;
+            const newDh = this.overlayH * newScale;
+            this.offsetX = cx - newDw / 2;
+            this.offsetY = cy - newDh / 2;
+          })
+        Text(`${Math.round(this.overlayScale * 100)}%`)
+          .fontSize(12)
+          .fontColor($r('app.color.brand'))
+          .width(48)
+          .textAlign(TextAlign.End)
+      }
+      .width('100%')
+
+      Row({ space: 12 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .buttonStyle(ButtonStyleMode.NORMAL)
+          .fontColor($r('app.color.brand'))
+          .enabled(!this.isSaving)
+          .onClick(() => {
+            this.pathStack.pop();
+          })
+        Button(this.isSaving ? '保存中…' : '确定')
+          .layoutWeight(1)
+          .buttonStyle(ButtonStyleMode.EMPHASIZED)
+          .backgroundColor($r('app.color.brand'))
+          .enabled(!this.isSaving && this.overlayReady)
+          .onClick(() => {
+            this.handleConfirm();
+          })
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding({ left: 24, right: 24, top: 16, bottom: 16 })
+    .backgroundColor($r('sys.color.background_primary'))
+    .borderRadius({ topLeft: 16, topRight: 16 })
   }
 
   build() {
@@ -372,65 +486,7 @@ export struct ImageOverlayPage {
           this.updateDisplayScale();
         })
 
-        Column({ space: 16 }) {
-          Row({ space: 12 }) {
-            Text('大小')
-              .fontSize(14)
-              .fontColor($r('sys.color.font_secondary'))
-              .width(40)
-            Slider({
-              min: 10,
-              max: 500,
-              value: Math.round(this.overlayScale * 100),
-              step: 1,
-              style: SliderStyle.InSet
-            })
-              .selectedColor($r('app.color.brand'))
-              .layoutWeight(1)
-              .onChange((v: number) => {
-                const newScale = v / 100;
-                const oldDw = this.overlayW * this.overlayScale;
-                const oldDh = this.overlayH * this.overlayScale;
-                const cx = this.offsetX + oldDw / 2;
-                const cy = this.offsetY + oldDh / 2;
-                this.overlayScale = newScale;
-                const newDw = this.overlayW * newScale;
-                const newDh = this.overlayH * newScale;
-                this.offsetX = cx - newDw / 2;
-                this.offsetY = cy - newDh / 2;
-              })
-            Text(`${Math.round(this.overlayScale * 100)}%`)
-              .fontSize(12)
-              .fontColor($r('app.color.brand'))
-              .width(48)
-              .textAlign(TextAlign.End)
-          }
-          .width('100%')
-
-          Row({ space: 12 }) {
-            Button('取消')
-              .layoutWeight(1)
-              .buttonStyle(ButtonStyleMode.NORMAL)
-              .fontColor($r('app.color.brand'))
-              .enabled(!this.isSaving)
-              .onClick(() => {
-                this.pathStack.pop();
-              })
-            Button(this.isSaving ? '保存中…' : '确定')
-              .layoutWeight(1)
-              .buttonStyle(ButtonStyleMode.EMPHASIZED)
-              .backgroundColor($r('app.color.brand'))
-              .enabled(!this.isSaving && this.overlayReady)
-              .onClick(() => {
-                this.handleConfirm();
-              })
-          }
-          .width('100%')
-        }
-        .width('100%')
-        .padding({ left: 24, right: 24, top: 16, bottom: 16 })
-        .backgroundColor($r('sys.color.background_primary'))
-        .borderRadius({ topLeft: 16, topRight: 16 })
+        this.buildControls()
       }
       .width('100%')
       .height('100%')

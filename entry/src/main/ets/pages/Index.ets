@@ -57,9 +57,47 @@ class ProjectDataSource implements IDataSource {
     }
   }
 
-  setProjects(projects: DrawProject[]): void {
-    this.projects = projects;
+  private notifyReload(): void {
     this.listeners.forEach((l: DataChangeListener) => l.onDataReloaded());
+  }
+
+  private notifyChange(index: number): void {
+    this.listeners.forEach((l: DataChangeListener) => l.onDataChange(index));
+  }
+
+  setProjects(projects: DrawProject[]): void {
+    const old = this.projects;
+    this.projects = projects;
+
+    if (old.length !== projects.length) {
+      this.notifyReload();
+      return;
+    }
+    for (let i = 0; i < projects.length; i++) {
+      if (old[i].id !== projects[i].id) {
+        this.notifyReload();
+        return;
+      }
+    }
+    for (let i = 0; i < projects.length; i++) {
+      const a = old[i];
+      const b = projects[i];
+      if (a.name !== b.name || a.width !== b.width ||
+        a.height !== b.height || a.updatedAt !== b.updatedAt) {
+        this.notifyChange(i);
+      }
+    }
+  }
+
+  /** 缩略图补齐后，只重建这些 id 对应的项，不 reload 全表 */
+  refreshThumbnails(ids: string[]): void {
+    if (ids.length === 0) return;
+    const set = new Set<string>(ids);
+    for (let i = 0; i < this.projects.length; i++) {
+      if (set.has(this.projects[i].id)) {
+        this.notifyChange(i);
+      }
+    }
   }
 
   getAllNames(): string[] {
@@ -78,7 +116,6 @@ struct Index {
   @State sortBy: SortBy = 'time';
   @State viewMode: ViewMode = 'list';
   @State projectCount: number = 0;
-  @State thumbVersion: number = 0;
   @State isShowingPrivacy: boolean = false;
   @State isShowingFullPrivacy: boolean = false;
   @State isShowingAbout: boolean = false;
@@ -89,7 +126,6 @@ struct Index {
   @State isMultiSelecting: boolean = false;
   @State selectedIds: Set<string> = new Set<string>();
 
-  // ===== 搜索 =====
   @State searchText: string = '';
   private allProjects: DrawProject[] = [];
 
@@ -420,7 +456,7 @@ struct Index {
   async generateMissingThumbs(): Promise<void> {
     try {
       const projects = await ProjectStore.list();
-      let generated = 0;
+      const generatedIds: string[] = [];
       for (const p of projects) {
         const thumbPath = ProjectStore.getThumbPath(p.id);
         if (fileIo.accessSync(thumbPath)) continue;
@@ -455,15 +491,14 @@ struct Index {
           await imageSource.release();
           fileIo.closeSync(file);
 
-          generated++;
+          generatedIds.push(p.id);
         } catch (e) {
           console.warn(`生成缩略图失败: ${p.id}`, e);
         }
       }
-      if (generated > 0) {
-        console.info(`补齐缩略图完成，共 ${generated} 个`);
-        this.thumbVersion++;
-        await this.loadProjects();
+      if (generatedIds.length > 0) {
+        console.info(`补齐缩略图完成，共 ${generatedIds.length} 个`);
+        this.dataSource.refreshThumbnails(generatedIds);
       }
     } catch (e) {
       console.error('补齐缩略图失败:', e);
@@ -473,7 +508,6 @@ struct Index {
   createProject(): void {
     this.newProjectDialogController = new CustomDialogController({
       builder: NewProjectDialog({
-        // ===== 搜索 =====：使用完整列表校验重名，避免搜索状态漏判
         existingNames: this.allProjects.map((p: DrawProject) => p.name),
         onConfirm: async (name: string, w: number, h: number) => {
           const id = Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
@@ -500,7 +534,6 @@ struct Index {
     this.renameDialogController = new CustomDialogController({
       builder: RenameProjectDialog({
         currentName: project.name,
-        // ===== 搜索 =====：同样用完整列表校验重名
         existingNames: this.allProjects.map((p: DrawProject) => p.name),
         onConfirm: async (newName: string) => {
           await this.doRename(project, newName);
@@ -782,6 +815,50 @@ struct Index {
     event.setData(unifiedData);
   }
 
+  private async duplicateProject(project: DrawProject): Promise<void> {
+    try {
+      const newId = Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
+
+      const usedNames = new Set<string>(this.allProjects.map((p: DrawProject) => p.name));
+      const baseName = `${project.name}(副本)`;
+      let finalName = baseName;
+      let counter = 2;
+      while (usedNames.has(finalName)) {
+        finalName = `${project.name}(副本${counter})`;
+        counter++;
+      }
+
+      const srcImage = ProjectStore.getImagePath(project.id);
+      const dstImage = ProjectStore.getImagePath(newId);
+      if (fileIo.accessSync(srcImage)) {
+        fileIo.copyFileSync(srcImage, dstImage);
+      }
+
+      const srcThumb = ProjectStore.getThumbPath(project.id);
+      const dstThumb = ProjectStore.getThumbPath(newId);
+      if (fileIo.accessSync(srcThumb)) {
+        fileIo.copyFileSync(srcThumb, dstThumb);
+      }
+
+      const now = Date.now();
+      const newProject: DrawProject = {
+        id: newId,
+        name: finalName,
+        width: project.width,
+        height: project.height,
+        createdAt: now,
+        updatedAt: now
+      };
+      await ProjectStore.upsert(newProject);
+
+      await this.loadProjects();
+      promptAction.openToast({ message: `已复制为 "${finalName}"` }).catch(() => {});
+    } catch (e) {
+      console.error('复制项目失败:', e);
+      promptAction.openToast({ message: '复制失败' }).catch(() => {});
+    }
+  }
+
   @Builder
   PageMap(name: string, param: object) {
     if (name === 'EditorPage') {
@@ -821,7 +898,7 @@ struct Index {
   buildSearchBar(): void {
     if (!this.isMultiSelecting && this.allProjects.length > 0) {
       Column() {
-        if(deviceInfo.apiAvailable('26.0.0')) {
+        if (deviceInfo.apiAvailable('26.0.0')) {
           Search({
             value: $$this.searchText,
             placeholder: '搜索...'
@@ -840,7 +917,7 @@ struct Index {
             })
             .systemMaterial(new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN }))
             .width('100%')
-        }else{
+        } else {
           Search({
             value: $$this.searchText,
             placeholder: '搜索...'
@@ -860,7 +937,7 @@ struct Index {
             .width('100%')
         }
       }
-      .padding({left:16,right:16})
+      .padding({ left: 16, right: 16 })
       .width('100%')
     }
   }
@@ -872,6 +949,10 @@ struct Index {
         MenuItem({ content: '重命名' })
           .onClick(() => {
             if (this.contextMenuProject) this.showRenameDialog(this.contextMenuProject);
+          })
+        MenuItem({ content: '复制' })
+          .onClick(() => {
+            if (this.contextMenuProject) this.duplicateProject(this.contextMenuProject);
           })
         MenuItem({ content: '删除' })
           .onClick(() => {
@@ -932,6 +1013,7 @@ struct Index {
         .height(40)
         .bindMenu([
           { value: '重命名', action: () => this.showRenameDialog(project) },
+          { value: '复制', action: () => this.duplicateProject(project) },
           { value: '删除', action: () => this.deleteProject(project) }
         ], getMenuOptions())
         .draggable(false)
@@ -1077,7 +1159,7 @@ struct Index {
           this.ProjectListCard(project)
         }
         .padding({ left: 16, right: 16 })
-      }, (project: DrawProject) => `${project.id}_${project.updatedAt}_${this.thumbVersion}`)
+      }, (project: DrawProject) => `${project.id}_${project.updatedAt}`)
     }
     .width('100%')
     .height('100%')
@@ -1097,7 +1179,7 @@ struct Index {
         GridItem() {
           this.ProjectGridCard(project)
         }
-      }, (project: DrawProject) => `${project.id}_${project.updatedAt}_${this.thumbVersion}`)
+      }, (project: DrawProject) => `${project.id}_${project.updatedAt}`)
     }
     .columnsTemplate(this.getColumnsTemplate())
     .columnsGap(12)
@@ -1144,220 +1226,211 @@ struct Index {
   }
 
   build() {
-    if(!this.isShowingPrivacy) {
-      HdsNavigation(this.pathStack) {
-        Column()
-          .width(0)
-          .height(0)
-          .bindSheet($$this.isShowingAbout, this.buildAbout, {
-            detents: [SheetSize.LARGE], dragBar: false, preferType: SheetType.CENTER
-          })
-        Column() {
-          if (this.projectCount === 0) {
-            this.EmptyState()
-          } else if (this.viewMode === 'grid') {
-            this.ProjectGrid()
-          } else {
-            this.ProjectList()
-          }
+    HdsNavigation(this.pathStack) {
+      Column()
+        .width(0)
+        .height(0)
+        .bindSheet($$this.isShowingAbout, this.buildAbout, {
+          detents: [SheetSize.LARGE], dragBar: false, preferType: SheetType.CENTER
+        })
+      Column() {
+        if (this.projectCount === 0) {
+          this.EmptyState()
+        } else if (this.viewMode === 'grid') {
+          this.ProjectGrid()
+        } else {
+          this.ProjectList()
         }
-        .clip(false)
-        .width('100%')
-        .height('100%')
-        .backgroundColor($r('sys.color.background_secondary'))
-        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-        .border({
-          width: this.isDragHover ? (this.draggingProjectId == '' ? 2 : 0) : 0,
-          color: $r('app.color.brand'),
-          radius: 12
-        })
-        .allowDrop(this.draggingProjectId == '' ? [uniformTypeDescriptor.UniformDataType.IMAGE] : [])
-        .onDragEnter(() => {
-          this.isDragHover = true;
-        })
-        .onDragLeave(() => {
-          this.isDragHover = false;
-        })
-        .onDrop((event: DragEvent) => {
-          this.isDragHover = false;
-          this.handleImageDrop(event);
-        })
-        .bindSheet($$this.isShowingPrivacy, this.buildPrivacy, {
-          detents: [SheetSize.LARGE],
-          dragBar: false,
-          showClose: false,
-          preferType: SheetType.CENTER,
-          onWillDismiss: (action: DismissSheetAction) => {
-            if (action.reason === DismissReason.PRESS_BACK) {
-              this.privacyVM.onReject();
-              return;
-            }
-          }
-        })
       }
-      .bindSheet($$this.isShowingFullPrivacy, this.buildFullPrivacy, {
+      .clip(false)
+      .width('100%')
+      .height('100%')
+      .backgroundColor($r('sys.color.background_secondary'))
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+      .border({
+        width: this.isDragHover ? (this.draggingProjectId == '' ? 2 : 0) : 0,
+        color: $r('app.color.brand'),
+        radius: 12
+      })
+      .allowDrop(this.draggingProjectId == '' ? [uniformTypeDescriptor.UniformDataType.IMAGE] : [])
+      .onDragEnter(() => {
+        this.isDragHover = true;
+      })
+      .onDragLeave(() => {
+        this.isDragHover = false;
+      })
+      .onDrop((event: DragEvent) => {
+        this.isDragHover = false;
+        this.handleImageDrop(event);
+      })
+      .bindSheet($$this.isShowingPrivacy, this.buildPrivacy, {
         detents: [SheetSize.LARGE],
         dragBar: false,
-        preferType: SheetType.CENTER
-      })
-      .mode(NavigationMode.Stack)
-      .navDestination(this.PageMap)
-      .titleBar({
-        content: {
-          title: {
-            mainTitle: this.isMultiSelecting
-              ? `已选择 ${this.selectedIds.size} 项`
-              : $r('app.string.EntryAbility_label')
-          },
-          backIcon: this.isMultiSelecting ? {
-            isEnabled: true,
-            label: '取消',
-            icon: $r('sys.symbol.xmark'),
-            action: () => {
-              this.exitMultiSelect();
-            }
-          } : undefined,
-          menu: this.isMultiSelecting ? {
-            value: [
-              {
-                content: {
-                  label: (this.projectCount > 0 && this.selectedIds.size === this.projectCount)
-                    ? '取消全选' : '全选',
-                  icon: $r('sys.symbol.checkmark_square_on_square'),
-                  action: () => {
-                    this.toggleSelectAll();
-                  }
-                }
-              },
-              {
-                content: {
-                  label: '删除',
-                  icon: $r('sys.symbol.trash'),
-                  action: () => {
-                    this.deleteSelected();
-                  }
-                }
-              },
-              {
-                content: {
-                  label: '分享',
-                  icon: $r('sys.symbol.share'),
-                  action: () => {
-                    this.shareSelected();
-                  }
-                }
-              }
-            ],
-            maxCount: 3
-          } : {
-            value: [
-              {
-                content: {
-                  label: '新建项目',
-                  icon: $r('sys.symbol.plus'),
-                  action: () => this.createProject()
-                }
-              },
-              {
-                content: {
-                  label: this.sortBy === 'time' ? '按时间' : '按名称',
-                  icon: this.sortBy === 'time' ? $r('sys.symbol.clock') : $r('sys.symbol.textformat'),
-                  action: () => this.toggleSort(),
-                  type: TextStyleMode.NORMAL
-                }
-              },
-              {
-                content: {
-                  label: this.viewMode === 'list' ? '宫格视图' : '列表视图',
-                  icon: this.viewMode === 'list' ? $r('sys.symbol.list_bullet') : $r('sys.symbol.square_grid_2x2'),
-                  action: () => this.toggleView()
-                }
-              },
-              {
-                content: {
-                  label: '导入图片',
-                  icon: $r('sys.symbol.picture'),
-                  action: () => this.importPng()
-                }
-              },
-              {
-                content: {
-                  label: '多选',
-                  icon: $r('sys.symbol.checkmark_square_on_square'),
-                  action: () => {
-                    if (this.searchText !== '') {
-                      this.searchText = '';
-                      this.applyFilterAndSort();
-                    }
-                    this.selectedIds = new Set<string>();
-                    this.isMultiSelecting = true;
-                  }
-                }
-              },
-              {
-                content: {
-                  label: '关于',
-                  icon: $r('sys.symbol.info_circle'),
-                  action: () => {
-                    this.isShowingAbout = true;
-                  }
-                }
-              }
-            ],
-            maxCount: this.windowWidth >= 840 ? 5 : (this.windowWidth >= 500 ? 4 : 3)
-          },
-          bottomBuilder: this.isMultiSelecting ? undefined : {
-            builder: () => this.buildSearchBar()
-          }
-        },
-        enableComponentSafeArea: true,
-        style: {
-          scrollEffectOpts: {
-            enableScrollEffect: true,
-            scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
-            blurEffectiveStartOffset: LengthMetrics.vp(0),
-            blurEffectiveEndOffset: LengthMetrics.vp(28)
-          },
-          originalStyle: {
-            backgroundStyle: {
-              backgroundColor: Color.Transparent
-            },
-            contentStyle: {
-              titleStyle: {
-                mainTitleColor: $r('sys.color.font_primary')
-              },
-              menuStyle: {
-                iconColor: $r('sys.color.font_primary'),
-                textColor: $r('sys.color.font_primary'),
-                backgroundColor: deviceInfo.apiAvailable('26.0.0') ?
-                  undefined : $r('sys.color.background_tertiary')
-              },
-              backIconStyle: {
-                iconColor: $r('sys.color.font_primary'),
-                textColor: $r('sys.color.font_primary'),
-                backgroundColor: deviceInfo.apiAvailable('26.0.0') ?
-                  undefined : $r('sys.color.background_tertiary')
-              }
-            }
-          },
-          systemMaterialEffect: {
-            materialType: hdsMaterial.MaterialType.ADAPTIVE,
-            materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+        showClose: false,
+        preferType: SheetType.CENTER,
+        onWillDismiss: (action: DismissSheetAction) => {
+          if (action.reason === DismissReason.PRESS_BACK) {
+            this.privacyVM.onReject();
+            return;
           }
         }
       })
-      .titleMode(deviceInfo.deviceType == deviceInfo.DeviceTypes.TYPE_2IN1 ? HdsNavigationTitleMode.MINI :
-        (this.isMultiSelecting ? HdsNavigationTitleMode.MINI : HdsNavigationTitleMode.FREE))
-      .hideBackButton(!this.isMultiSelecting)
-      .bindToScrollable([this.scroller, this.gridscroller])
-      .backgroundColor($r('sys.color.background_secondary'))
     }
-    else {
-      Column() {}
-        .width('100%')
-        .height('100%')
-        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-        .backgroundColor($r('sys.color.background_secondary'))
-    }
+    .bindSheet($$this.isShowingFullPrivacy, this.buildFullPrivacy, {
+      detents: [SheetSize.LARGE],
+      dragBar: false,
+      preferType: SheetType.CENTER
+    })
+    .mode(NavigationMode.Stack)
+    .navDestination(this.PageMap)
+    .titleBar({
+      content: {
+        title: {
+          mainTitle: this.isMultiSelecting
+            ? `已选择 ${this.selectedIds.size} 项`
+            : $r('app.string.EntryAbility_label')
+        },
+        backIcon: this.isMultiSelecting ? {
+          isEnabled: true,
+          label: '取消',
+          icon: $r('sys.symbol.xmark'),
+          action: () => {
+            this.exitMultiSelect();
+          }
+        } : undefined,
+        menu: this.isMultiSelecting ? {
+          value: [
+            {
+              content: {
+                label: (this.projectCount > 0 && this.selectedIds.size === this.projectCount)
+                  ? '取消全选' : '全选',
+                icon: $r('sys.symbol.checkmark_square_on_square'),
+                action: () => {
+                  this.toggleSelectAll();
+                }
+              }
+            },
+            {
+              content: {
+                label: '删除',
+                icon: $r('sys.symbol.trash'),
+                action: () => {
+                  this.deleteSelected();
+                }
+              }
+            },
+            {
+              content: {
+                label: '分享',
+                icon: $r('sys.symbol.share'),
+                action: () => {
+                  this.shareSelected();
+                }
+              }
+            }
+          ],
+          maxCount: 3
+        } : {
+          value: [
+            {
+              content: {
+                label: '新建项目',
+                icon: $r('sys.symbol.plus'),
+                action: () => this.createProject()
+              }
+            },
+            {
+              content: {
+                label: this.sortBy === 'time' ? '按时间' : '按名称',
+                icon: this.sortBy === 'time' ? $r('sys.symbol.clock') : $r('sys.symbol.textformat'),
+                action: () => this.toggleSort(),
+                type: TextStyleMode.NORMAL
+              }
+            },
+            {
+              content: {
+                label: this.viewMode === 'list' ? '宫格视图' : '列表视图',
+                icon: this.viewMode === 'list' ? $r('sys.symbol.list_bullet') : $r('sys.symbol.square_grid_2x2'),
+                action: () => this.toggleView()
+              }
+            },
+            {
+              content: {
+                label: '导入图片',
+                icon: $r('sys.symbol.picture_badge_arrow_down'),
+                action: () => this.importPng()
+              }
+            },
+            {
+              content: {
+                label: '多选',
+                icon: $r('sys.symbol.checkmark_square_on_square'),
+                action: () => {
+                  if (this.searchText !== '') {
+                    this.searchText = '';
+                    this.applyFilterAndSort();
+                  }
+                  this.selectedIds = new Set<string>();
+                  this.isMultiSelecting = true;
+                }
+              }
+            },
+            {
+              content: {
+                label: '关于',
+                icon: $r('sys.symbol.info_circle'),
+                action: () => {
+                  this.isShowingAbout = true;
+                }
+              }
+            }
+          ],
+          maxCount: this.windowWidth >= 840 ? 5 : (this.windowWidth >= 500 ? 4 : 3)
+        },
+        bottomBuilder: this.isMultiSelecting ? undefined : {
+          builder: () => this.buildSearchBar()
+        }
+      },
+      enableComponentSafeArea: true,
+      style: {
+        scrollEffectOpts: {
+          enableScrollEffect: true,
+          scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
+          blurEffectiveStartOffset: LengthMetrics.vp(0),
+          blurEffectiveEndOffset: LengthMetrics.vp(28)
+        },
+        originalStyle: {
+          backgroundStyle: {
+            backgroundColor: Color.Transparent
+          },
+          contentStyle: {
+            titleStyle: {
+              mainTitleColor: $r('sys.color.font_primary')
+            },
+            menuStyle: {
+              iconColor: $r('sys.color.font_primary'),
+              textColor: $r('sys.color.font_primary'),
+              backgroundColor: deviceInfo.apiAvailable('26.0.0') ?
+                undefined : $r('sys.color.background_tertiary')
+            },
+            backIconStyle: {
+              iconColor: $r('sys.color.font_primary'),
+              textColor: $r('sys.color.font_primary'),
+              backgroundColor: deviceInfo.apiAvailable('26.0.0') ?
+                undefined : $r('sys.color.background_tertiary')
+            }
+          }
+        },
+        systemMaterialEffect: {
+          materialType: hdsMaterial.MaterialType.ADAPTIVE,
+          materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+        }
+      }
+    })
+    .titleMode(deviceInfo.deviceType == deviceInfo.DeviceTypes.TYPE_2IN1 ? HdsNavigationTitleMode.MINI :
+      (this.isMultiSelecting ? HdsNavigationTitleMode.MINI : HdsNavigationTitleMode.FREE))
+    .hideBackButton(!this.isMultiSelecting)
+    .bindToScrollable([this.scroller, this.gridscroller])
+    .backgroundColor($r('sys.color.background_secondary'))
   }
 }

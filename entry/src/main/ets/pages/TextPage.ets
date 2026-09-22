@@ -4,8 +4,8 @@ import { CursorController, LengthMetricsUnit, promptAction } from '@kit.ArkUI';
 import { taskpool } from '@kit.ArkTS';
 import { ProjectStore, DrawProject } from '../common/ProjectStore';
 import { hdsMaterial, HdsNavDestination } from '@kit.UIDesignKit';
-import { PickColorDialog } from '../dialogs/PickColorDialog';
-import { pointer } from '@kit.InputKit';
+import { PickColorComponent } from '../components/PickColorComponent';
+import { KeyCode, pointer } from '@kit.InputKit';
 
 export interface TextParam {
   project: DrawProject;
@@ -75,12 +75,11 @@ async function encodeTextToPng(
   }
 }
 
-/** 离屏画布的最大边长，超过此值创建会失败或占用过大显存 */
 const MAX_OFFSCREEN_SIDE = 4096;
 
 @Component
 export struct TextPage {
-  colorDialogController: CustomDialogController | null = null;
+  @State showColorSheet: boolean = false;
   cursorController: CursorController = this.getUIContext().getCursorController();
 
   @Prop project: DrawProject;
@@ -105,7 +104,6 @@ export struct TextPage {
 
   private pathStack: NavPathStack = new NavPathStack();
 
-  // 离屏画布：不在 UI 树中渲染，仅用于像素级合成
   private offCanvas: OffscreenCanvas | null = null;
   private pixelCtx: OffscreenCanvasRenderingContext2D | null = null;
 
@@ -118,17 +116,24 @@ export struct TextPage {
   }
 
   aboutToDisappear(): void {
-    // 释放离屏画布引用，帮助 GC 回收
     this.pixelCtx = null;
     this.offCanvas = null;
     this.pixelCanvasReady = false;
   }
 
-  /**
-   * 创建离屏画布。
-   * 注意：必须指定 LengthMetricsUnit.PX，否则尺寸会按 vp 解释，
-   * 在高 DPI 屏上实际像素数会被放大数倍。
-   */
+  @Builder
+  buildColorSheet(): void {
+    PickColorComponent({
+      currentColor: this.color,
+      onColorSelected: (c: string) => {
+        this.color = c;
+      },
+      onClose:()=>{
+        this.showColorSheet = false;
+      }
+    })
+  }
+
   private initOffscreenCanvas(): void {
     if (this.canvasW <= 0 || this.canvasH <= 0) {
       this.pixelCanvasReady = false;
@@ -171,17 +176,7 @@ export struct TextPage {
   }
 
   private openColorPicker(): void {
-    this.colorDialogController = new CustomDialogController({
-      builder: PickColorDialog({
-        currentColor: this.color,
-        onColorSelected: (c: string) => {
-          this.color = c;
-        }
-      }),
-      autoCancel: true,
-      alignment: DialogAlignment.Bottom
-    });
-    this.colorDialogController.open();
+    this.showColorSheet =true;
   }
 
   private clampTextPosition(): void {
@@ -202,7 +197,6 @@ export struct TextPage {
       return;
     }
 
-    // 提取为局部变量，既满足类型检查又避免重复判空
     const ctx = this.pixelCtx;
     if (!ctx) {
       promptAction.openToast({ message: '画布未就绪' }).catch(() => {});
@@ -211,7 +205,6 @@ export struct TextPage {
 
     this.isBusy = true;
     try {
-      // 1. 合成底图 + 文字到画布像素空间
       const path = ProjectStore.getImagePath(this.project.id);
       ctx.clearRect(0, 0, this.canvasW, this.canvasH);
 
@@ -228,7 +221,6 @@ export struct TextPage {
         ctx.fillRect(0, 0, this.canvasW, this.canvasH);
       }
 
-      // 2. 绘制文字：vp 位置 → 画布像素
       const ratio = this.canvasW / this.dispW;
       const px = this.textX * ratio;
       const py = this.textY * ratio;
@@ -241,11 +233,9 @@ export struct TextPage {
       ctx.fillText(this.text, px, py);
       ctx.restore();
 
-      // 3. 读像素
       const data = ctx.getImageData(0, 0, this.canvasW, this.canvasH);
       const pixels = new Uint8ClampedArray(data.data);
 
-      // 4. 编码写盘
       const thumbPath = ProjectStore.getThumbPath(this.project.id);
       const task = new taskpool.Task(
         encodeTextToPng, pixels, this.canvasW, this.canvasH, path, thumbPath
@@ -276,21 +266,67 @@ export struct TextPage {
     }
   }
 
+  private handleArrowKey(event: KeyEvent): void {
+    if (event.type !== KeyType.Down) return;
+    if (this.dispW <= 0 || this.dispH <= 0) return;
+
+    let step = 1;
+    try {
+      if (event.getModifierKeyState && event.getModifierKeyState(['Shift'])) {
+        step = 10;
+      }
+    }catch(err){
+      console.error('无法getModifierKeyState');
+    }
+
+    switch (event.keyCode) {
+      case KeyCode.KEYCODE_DPAD_LEFT:
+        this.textX -= step;
+        break;
+      case KeyCode.KEYCODE_DPAD_RIGHT:
+        this.textX += step;
+        break;
+      case KeyCode.KEYCODE_DPAD_UP:
+        this.textY -= step;
+        break;
+      case KeyCode.KEYCODE_DPAD_DOWN:
+        this.textY += step;
+        break;
+      default:
+        return;
+    }
+    this.clampTextPosition();
+    event.stopPropagation();
+  }
+
   @Builder
   PreviewArea() {
     Stack({ alignContent: Alignment.TopStart }) {
-      if (this.baseUri.length > 0) {
-        Image(this.baseUri)
-          .width('100%')
-          .height('100%')
-          .objectFit(ImageFit.Fill)
-          .draggable(false)
-      } else {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('#FFFFFF')
+      Stack({ alignContent: Alignment.TopStart }) {
+        if (this.baseUri.length > 0) {
+          Image(this.baseUri)
+            .width('100%')
+            .height('100%')
+            .objectFit(ImageFit.Fill)
+            .draggable(false)
+        } else {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor('#FFFFFF')
+        }
       }
+      .width(this.dispW > 0 ? `${this.dispW}vp` : '100%')
+      .height(this.dispH > 0 ? `${this.dispH}vp` : '100%')
+      .clip(true)
+      .backgroundColor('#FFFFFF')
+      .border({ width: 1, color: '#10000000' })
+      .shadow({
+        radius: 16,
+        color: 'rgba(0, 0, 0, 0.10)',
+        offsetX: 0,
+        offsetY: 4
+      })
 
       if (this.text.length > 0 && this.dispW > 0) {
         Text(this.text)
@@ -299,10 +335,9 @@ export struct TextPage {
           .opacity(this.textopacity)
           .position({ x: this.textX, y: this.textY })
           .draggable(false)
-          .border({
-            width: 2,
-            color: $r('app.color.brand')
-          })
+          .border({ width: 2, color: $r('app.color.brand') })
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.None })
           .gesture(
             PanGesture({ fingers: 1 })
               .onActionStart(() => {
@@ -322,152 +357,182 @@ export struct TextPage {
               this.cursorController.restoreDefault();
             }
           })
+
+          .focusable(true)
+          .focusOnTouch(true)
+          .id('overlayText')
+          .onAppear(() => {
+            setTimeout(() => {
+              try {
+                this.getUIContext()
+                  .getFocusController()
+                  .requestFocus('overlayText');
+              } catch (error) {
+                console.error(`无法requestFocus: ${error}`)
+              }
+            }, 50);
+          })
+          .onKeyEvent((event: KeyEvent) => {
+            this.handleArrowKey(event);
+          })
       }
     }
     .width(this.dispW > 0 ? `${this.dispW}vp` : '100%')
     .height(this.dispH > 0 ? `${this.dispH}vp` : '100%')
-    .clip(true)
-    .backgroundColor('#FFFFFF')
-    .border({ width: 1, color: '#10000000' })
+  }
+
+  @Builder
+  buildControls(): void {
+    Column({ space: 12 }) {
+      Row({ space: 8 }) {
+        Text('文字')
+          .fontSize(14)
+          .fontColor($r('sys.color.font_primary'))
+          .width(48)
+        TextInput({ text: this.text, placeholder: '输入要添加的文字' })
+          .layoutWeight(1)
+          .onChange((v: string) => {
+            this.text = v;
+          })
+      }
+      .width('100%')
+
+      Row({ space: 8 }) {
+        Text('大小')
+          .fontSize(14)
+          .fontColor($r('sys.color.font_primary'))
+          .width(48)
+        Slider({ value: this.fontSizePx, min: 12, max: 400, step: 1 })
+          .selectedColor($r('app.color.brand'))
+          .layoutWeight(1)
+          .onChange((v: number) => {
+            this.fontSizePx = Math.round(v);
+          })
+        Text(`${this.fontSizePx}`)
+          .fontSize(12)
+          .fontColor($r('sys.color.font_secondary'))
+          .width(40)
+          .textAlign(TextAlign.End)
+      }
+      .width('100%')
+
+      Row({ space: 8 }) {
+        Text('不透明')
+          .fontSize(14)
+          .fontColor($r('sys.color.font_primary'))
+          .width(48)
+        Slider({ value: this.textopacity * 100, min: 10, max: 100, step: 1 })
+          .selectedColor($r('app.color.brand'))
+          .layoutWeight(1)
+          .onChange((v: number) => {
+            this.textopacity = v / 100;
+          })
+        Text(`${Math.round(this.textopacity * 100)}%`)
+          .fontSize(12)
+          .fontColor($r('sys.color.font_secondary'))
+          .width(40)
+          .textAlign(TextAlign.End)
+      }
+      .width('100%')
+
+      Row({ space: 8 }) {
+        Text('颜色')
+          .fontSize(14)
+          .fontColor($r('sys.color.font_primary'))
+          .width(48)
+        Button() {
+          Row({ space: 10 }) {
+            Column()
+              .height(28)
+              .borderRadius(14)
+              .backgroundColor(this.color)
+              .border({ width: 1, color: '#20000000' })
+              .layoutWeight(1)
+            Text(this.color)
+              .fontSize(13)
+              .fontColor($r('sys.color.font_secondary'))
+          }
+          .width('100%')
+        }
+        .padding(4)
+        .layoutWeight(1)
+        .buttonStyle(ButtonStyleMode.TEXTUAL)
+        .onClick(() => {
+          this.openColorPicker();
+        })
+        .bindSheet(this.showColorSheet,this.buildColorSheet(),{
+          preferType: SheetType.POPUP,
+          height: SheetSize.FIT_CONTENT,
+          enableOutsideInteractive:false,
+          dragBar: false,
+          showClose: false,
+          backgroundColor: $r('sys.color.background_primary'),
+          onDisappear: () => {
+            this.showColorSheet = false;
+          }
+        })
+      }
+      .width('100%')
+
+      Row({ space: 12 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .buttonStyle(ButtonStyleMode.NORMAL)
+          .fontColor($r('app.color.brand'))
+          .onClick(() => this.pathStack.pop())
+
+        Button('添加')
+          .layoutWeight(1)
+          .buttonStyle(ButtonStyleMode.EMPHASIZED)
+          .backgroundColor($r('app.color.brand'))
+          .enabled(!this.isBusy)
+          .onClick(() => this.confirm())
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 12, bottom: 16 })
+    .backgroundColor($r('sys.color.background_primary'))
   }
 
   build() {
     HdsNavDestination() {
-      Column() {
         Column() {
-          if (this.dispW > 0) {
-            this.PreviewArea()
-          }
-        }
-        .width('100%')
-        .layoutWeight(1)
-        .padding(16)
-        .justifyContent(FlexAlign.Center)
-        .alignItems(HorizontalAlign.Center)
-        .onAreaChange((_o: Area, n: Area) => {
-          const availW = Number(n.width) - 32;
-          const availH = Number(n.height) - 32;
-          if (availW <= 0 || availH <= 0) return;
-
-          const canvasRatio = this.canvasW / this.canvasH;
-          const availRatio = availW / availH;
-          if (availRatio > canvasRatio) {
-            this.dispH = availH;
-            this.dispW = availH * canvasRatio;
-          } else {
-            this.dispW = availW;
-            this.dispH = availW / canvasRatio;
-          }
-
-          if (this.textX === 0 && this.textY === 0 && this.dispW > 0) {
-            this.textX = this.dispW / 4;
-            this.textY = this.dispH / 2 - 20;
-          }
-        })
-
-        Column({ space: 12 }) {
-          Row({ space: 8 }) {
-            Text('文字')
-              .fontSize(14)
-              .fontColor($r('sys.color.font_primary'))
-              .width(48)
-            TextInput({ text: this.text, placeholder: '输入要添加的文字' })
-              .layoutWeight(1)
-              .onChange((v: string) => {
-                this.text = v;
-              })
-          }
-          .width('100%')
-
-          Row({ space: 8 }) {
-            Text('大小')
-              .fontSize(14)
-              .fontColor($r('sys.color.font_primary'))
-              .width(48)
-            Slider({ value: this.fontSizePx, min: 12, max: 400, step: 1 })
-              .selectedColor($r('app.color.brand'))
-              .layoutWeight(1)
-              .onChange((v: number) => {
-                this.fontSizePx = Math.round(v);
-              })
-            Text(`${this.fontSizePx}`)
-              .fontSize(12)
-              .fontColor($r('sys.color.font_secondary'))
-              .width(40)
-              .textAlign(TextAlign.End)
-          }
-          .width('100%')
-
-          Row({ space: 8 }) {
-            Text('不透明')
-              .fontSize(14)
-              .fontColor($r('sys.color.font_primary'))
-              .width(48)
-            Slider({ value: this.textopacity * 100, min: 10, max: 100, step: 1 })
-              .selectedColor($r('app.color.brand'))
-              .layoutWeight(1)
-              .onChange((v: number) => {
-                this.textopacity = v / 100;
-              })
-            Text(`${Math.round(this.textopacity * 100)}%`)
-              .fontSize(12)
-              .fontColor($r('sys.color.font_secondary'))
-              .width(40)
-              .textAlign(TextAlign.End)
-          }
-          .width('100%')
-
-          Row({ space: 8 }) {
-            Text('颜色')
-              .fontSize(14)
-              .fontColor($r('sys.color.font_primary'))
-              .width(48)
-            Button() {
-              Row({ space: 10 }) {
-                Column()
-                  .width(28)
-                  .height(28)
-                  .borderRadius(14)
-                  .backgroundColor(this.color)
-                  .border({ width: 1, color: '#20000000' })
-                Text(this.color)
-                  .fontSize(13)
-                  .fontColor($r('sys.color.font_secondary'))
-                Blank()
-                  .layoutWeight(1)
-              }
-              .width('100%')
+          Column() {
+            if (this.dispW > 0) {
+              this.PreviewArea()
             }
-            .layoutWeight(1)
-            .buttonStyle(ButtonStyleMode.TEXTUAL)
-            .onClick(() => {
-              this.openColorPicker();
-            })
           }
           .width('100%')
+          .layoutWeight(1)
+          .padding(16)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+          .onAreaChange((_o: Area, n: Area) => {
+            const availW = Number(n.width) - 32;
+            const availH = Number(n.height) - 32;
+            if (availW <= 0 || availH <= 0) return;
 
-          Row({ space: 12 }) {
-            Button('取消')
-              .layoutWeight(1)
-              .buttonStyle(ButtonStyleMode.NORMAL)
-              .fontColor($r('app.color.brand'))
-              .onClick(() => this.pathStack.pop())
+            const canvasRatio = this.canvasW / this.canvasH;
+            const availRatio = availW / availH;
+            if (availRatio > canvasRatio) {
+              this.dispH = availH;
+              this.dispW = availH * canvasRatio;
+            } else {
+              this.dispW = availW;
+              this.dispH = availW / canvasRatio;
+            }
 
-            Button('添加')
-              .layoutWeight(1)
-              .buttonStyle(ButtonStyleMode.EMPHASIZED)
-              .backgroundColor($r('app.color.brand'))
-              .enabled(!this.isBusy)
-              .onClick(() => this.confirm())
-          }
-          .width('100%')
+            if (this.textX === 0 && this.textY === 0 && this.dispW > 0) {
+              this.textX = this.dispW / 4;
+              this.textY = this.dispH / 2 - 20;
+            }
+          })
+
+          this.buildControls();
         }
         .width('100%')
-        .padding({ left: 16, right: 16, top: 12, bottom: 16 })
-        .backgroundColor($r('sys.color.background_primary'))
-      }
-      .width('100%')
-      .height('100%')
+        .height('100%')
     }
     .titleBar({
       style: {

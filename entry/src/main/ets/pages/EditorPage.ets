@@ -2,12 +2,12 @@ import { common } from '@kit.AbilityKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { curves, LengthMetricsUnit, promptAction, uiMaterial } from '@kit.ArkUI';
+import { curves, LengthMetricsUnit, promptAction } from '@kit.ArkUI';
 import { taskpool } from '@kit.ArkTS';
 import { ProjectStore, DrawProject } from '../common/ProjectStore';
 import { hdsMaterial, HdsNavDestination, HdsNavigationBadgeIconOptions, TextStyleMode } from '@kit.UIDesignKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
-import { PickColorDialog } from '../dialogs/PickColorDialog';
+import { PickColorComponent } from '../components/PickColorComponent';
 import { LoadingDialog } from '../dialogs/LoadingDialog';
 import { ResizeCanvasDialog, ResizeMode } from '../dialogs/ResizeCanvasDialog';
 import { ImageOverlayParam } from './ImageOverlayPage';
@@ -180,7 +180,6 @@ function floodFillTask(
 
       visited[rowOff + x] = 1;
 
-      // ★ 顺手更新 bbox
       if (x < minX) minX = x;
       if (x > maxX) maxX = x;
       if (y < minY) minY = y;
@@ -365,6 +364,7 @@ export struct EditorPage {
   @State canUndo: boolean = false;
   @State canRedo: boolean = false;
   @State isBusy: boolean = false;
+  @State showColorSheet: boolean = false;
   @State hoverStates: Record<string, boolean> = {
     'brush': false,
     'eraser': false,
@@ -432,7 +432,6 @@ export struct EditorPage {
   private fillDownY: number = 0;
   private fillDownValid: boolean = false;
 
-  private colorDialogController: CustomDialogController | null = null;
   private loadingDialogController: CustomDialogController | null = null;
   private resizeCanvasController: CustomDialogController | null = null;
   private isImageLoaded: boolean = false;
@@ -440,17 +439,6 @@ export struct EditorPage {
   aboutToAppear(): void {
     this.canvasW = this.project.width;
     this.canvasH = this.project.height;
-
-    this.colorDialogController = new CustomDialogController({
-      builder: PickColorDialog({
-        currentColor: this.color,
-        onColorSelected: (color: string) => {
-          this.color = color;
-        }
-      }),
-      autoCancel: true,
-      alignment: DialogAlignment.Bottom
-    });
 
     this.resizeCanvasController = new CustomDialogController({
       builder: ResizeCanvasDialog({
@@ -1628,6 +1616,19 @@ export struct EditorPage {
   }
 
   @Builder
+  ColorSheetBuilder() {
+    PickColorComponent({
+      currentColor: this.color,
+      onColorSelected: (c: string) => {
+        this.color = c;
+      },
+      onClose: () => {
+        this.showColorSheet = false;
+      }
+    })
+  }
+
+  @Builder
   PickerPreview() {
     Column({ space: 6 }) {
       Column()
@@ -1859,7 +1860,7 @@ export struct EditorPage {
         .height(48)
         .justifyContent(FlexAlign.Center)
         .onClick(() => {
-          this.colorDialogController?.open();
+          this.showColorSheet = true;
         })
         .onHover((isHover: boolean) => {
           this.hoverStates['color'] = isHover;
@@ -1869,6 +1870,17 @@ export struct EditorPage {
         .backgroundColor(this.hoverStates['color'] ? $r('app.color.hover_color') : Color.Transparent)
         .borderRadius(12)
         .hitTestBehavior(HitTestMode.Block)
+        .bindSheet(this.showColorSheet, this.ColorSheetBuilder(), {
+          preferType: SheetType.POPUP,
+          height: SheetSize.FIT_CONTENT,
+          enableOutsideInteractive:false,
+          dragBar: false,
+          showClose: false,
+          backgroundColor: $r('sys.color.background_primary'),
+          onDisappear: () => {
+            this.showColorSheet = false;
+          }
+        })
       }
       .width('100%')
     }
@@ -2117,11 +2129,6 @@ export struct EditorPage {
       })
       .keyboardShortcut('0', [ModifierKey.CTRL], () => {
         this.resetZoom();
-      })
-      .keyboardShortcut('s', [ModifierKey.CTRL], () => {
-        this.saveToSandbox().then((ok: boolean) => {
-          promptAction.openToast({ message: ok ? '已保存' : '保存失败' }).catch(() => {});
-        });
       })
       .onKeyPreIme((event: KeyEvent): boolean => {
         if (event.type !== KeyType.Down) return false;
