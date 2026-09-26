@@ -343,6 +343,7 @@ export struct EditorPage {
   };
 
   @StorageProp('windowWidth') windowWidth: number = 0;
+  @StorageProp('windowHeight') windowHeight: number = 0;
   @StorageLink('projectsRefreshToken') @Watch('onProjectsChanged')
   projectsRefreshToken: number = 0;
 
@@ -389,6 +390,7 @@ export struct EditorPage {
   @State canvasH: number = 0;
 
   @State isDragHover: boolean = false;
+  @State toolbarVisible: boolean = true;
 
   private masterBuffer: ArrayBuffer | null = null;
   private masterReady: boolean = false;
@@ -1393,6 +1395,11 @@ export struct EditorPage {
   private onPointerDown(xVp: number, yVp: number): void {
     if (this.isFilling || this.isBusy) return;
 
+    if (!this.isWideScreen() && this.toolbarVisible) {
+      if (this.toolMode === 'brush' || this.toolMode === 'eraser' || this.toolMode === 'pan')
+        this.toolbarVisible = false;
+    }
+
     if (this.toolMode === 'pan') {
       this.panStartX = xVp;
       this.panStartY = yVp;
@@ -1962,22 +1969,15 @@ export struct EditorPage {
   BottomBars() {
     if (this.isWideScreen()) {
       Row({ space: 12 }) {
-        Column() {
-          this.ToolBarBody()
-        }
-        .width(400)
-
-        Blank()
-          .layoutWeight(1)
-          .hitTestBehavior(HitTestMode.None)
-
+        Column() { this.ToolBarBody() }.width(400)
+        Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
         this.DoBarBody()
       }
       .width('100%')
       .padding({ left: 24, right: 24, bottom: 24 })
       .alignItems(VerticalAlign.Bottom)
       .hitTestBehavior(HitTestMode.None)
-    } else {
+    } else if (this.windowHeight >= 600) {
       Column({ space: 6 }) {
         this.DoBar()
         this.ToolBar()
@@ -1985,7 +1985,61 @@ export struct EditorPage {
       .width('100%')
       .padding({ bottom: 8 })
       .hitTestBehavior(HitTestMode.None)
+    } else {
+      Stack({ alignContent: Alignment.Bottom }) {
+        this.ToolbarToggleHandle()
+
+        if (this.toolbarVisible) {
+          Column({ space: 6 }) {
+            this.DoBar()
+            this.ToolBar()
+          }
+          .width('100%')
+          .padding({ bottom: 8 })
+          .hitTestBehavior(HitTestMode.None)
+          .transition(
+            TransitionEffect.asymmetric(
+              TransitionEffect.OPACITY
+                .combine(TransitionEffect.translate({ y: 140 }))
+                .animation({ duration: 240, curve: Curve.FastOutSlowIn }),
+              TransitionEffect.OPACITY
+                .combine(TransitionEffect.translate({ y: 140 }))
+                .animation({ duration: 420, curve: Curve.Linear })
+            )
+          )
+        }
+      }
+      .width('100%')
+      .hitTestBehavior(HitTestMode.None)
     }
+  }
+
+  @Builder
+  ToolbarToggleHandle() {
+    Column() {
+      SymbolGlyph($r('sys.symbol.chevron_up'))
+        .fontSize(18)
+        .fontColor([$r('sys.color.font_primary')])
+    }
+    .width(48)
+    .height(30)
+    .borderRadius(15)
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor($r('app.color.immersive_background'))
+    .backdropBlur(20)
+    .border({ width: 0.5, color: 'rgba(255, 255, 255, 0.6)', radius: 15 })
+    .shadow({ radius: 12, color: 'rgba(0, 0, 0, 0.15)', offsetX: 0, offsetY: 2 })
+    .margin({ bottom: 12 })
+    .onClick(() => {
+      this.toolbarVisible = true;
+    })
+    .opacity(this.toolbarVisible ? 0 : 1)
+    .scale({
+      x: this.toolbarVisible ? 0.6 : 1.0,
+      y: this.toolbarVisible ? 0.6 : 1.0
+    })
+    .animation({ duration: 320, curve: Curve.FastOutSlowIn })
+    .hitTestBehavior(this.toolbarVisible ? HitTestMode.None : HitTestMode.Block)
   }
 
   build() {

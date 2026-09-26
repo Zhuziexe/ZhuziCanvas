@@ -89,7 +89,6 @@ class ProjectDataSource implements IDataSource {
     }
   }
 
-  /** 缩略图补齐后，只重建这些 id 对应的项，不 reload 全表 */
   refreshThumbnails(ids: string[]): void {
     if (ids.length === 0) return;
     const set = new Set<string>(ids);
@@ -275,7 +274,6 @@ struct Index {
       title: '权限使用说明',
       message: '竹子画板不申请任何需要您手动授权的系统权限。\n\n' +
         '基于安全访问机制，竹子画板只能访问你主动选择的图片，看不到相册里的其他内容。\n\n' +
-        '应用不会读取你的通讯录、位置、麦克风、摄像头或任何其他个人信息。\n\n' +
         '应用声明了“预关闭动作”权限（ohos.permission.PREPARE_APP_TERMINATE），' +
         '用于在电脑端关闭应用时弹出“是否保存”确认提示。该权限系统自动授予，不涉及任何数据收集。',
       confirm: {
@@ -464,10 +462,16 @@ struct Index {
         const srcPath = ProjectStore.getImagePath(p.id);
         if (!fileIo.accessSync(srcPath)) continue;
 
+        let file: fileIo.File | null = null;
+        let imageSource: image.ImageSource | null = null;
+        let pixelMap: image.PixelMap | null = null;
+        let packer: image.ImagePacker | null = null;
+        let out: fileIo.File | null = null;
+
         try {
-          const file = fileIo.openSync(srcPath, fileIo.OpenMode.READ_ONLY);
-          const imageSource = image.createImageSource(file.fd);
-          const pixelMap = await imageSource.createPixelMap();
+          file = fileIo.openSync(srcPath, fileIo.OpenMode.READ_ONLY);
+          imageSource = image.createImageSource(file.fd);
+          pixelMap = await imageSource.createPixelMap();
 
           const info = await pixelMap.getImageInfo();
           const maxSide = Math.max(info.size.width, info.size.height);
@@ -476,24 +480,24 @@ struct Index {
             await pixelMap.scale(s, s);
           }
 
-          const packer = image.createImagePacker();
+          packer = image.createImagePacker();
           const buf = await packer.packing(pixelMap, {
             format: 'image/png',
             quality: 80
           });
-          const out = fileIo.openSync(thumbPath,
+          out = fileIo.openSync(thumbPath,
             fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
           fileIo.writeSync(out.fd, buf);
-          fileIo.closeSync(out);
-
-          await packer.release();
-          await pixelMap.release();
-          await imageSource.release();
-          fileIo.closeSync(file);
 
           generatedIds.push(p.id);
         } catch (e) {
           console.warn(`生成缩略图失败: ${p.id}`, e);
+        } finally {
+          if (out) { try { fileIo.closeSync(out); } catch {} }
+          if (packer) { try { await packer.release(); } catch {} }
+          if (pixelMap) { try { await pixelMap.release(); } catch {} }
+          if (imageSource) { try { await imageSource.release(); } catch {} }
+          if (file) { try { fileIo.closeSync(file); } catch {} }
         }
       }
       if (generatedIds.length > 0) {
@@ -565,7 +569,7 @@ struct Index {
   }
 
   deleteProject(project: DrawProject): void {
-    AlertDialog.show({
+    this.getUIContext().showAlertDialog({
       title: '确认删除',
       message: `确定要删除项目"${project.name}"吗？`,
       buttons: [
@@ -616,30 +620,28 @@ struct Index {
     if (!uris || uris.length === 0) return 0;
     let successCount = 0;
 
-    // ===== 搜索 =====：用完整列表判重名
     const usedNames = new Set<string>(this.allProjects.map((p: DrawProject) => p.name));
 
     for (const sourceUri of uris) {
       try {
-        const srcFile = fileIo.openSync(sourceUri, fileIo.OpenMode.READ_ONLY);
-        const stat = fileIo.statSync(srcFile.fd);
-        const buffer = new ArrayBuffer(stat.size);
-        fileIo.readSync(srcFile.fd, buffer);
-        fileIo.closeSync(srcFile);
+        const buffer = this.readFileBuffer(sourceUri);
+        if (!buffer) continue;
 
         let imgW = 1280;
         let imgH = 720;
         let pixelMap: image.PixelMap | null = null;
+        let imageSource: image.ImageSource | null = null;
 
         try {
-          const imageSource = image.createImageSource(buffer);
+          imageSource = image.createImageSource(buffer);
           const info = await imageSource.getImageInfo();
           imgW = info.size.width;
           imgH = info.size.height;
           pixelMap = await imageSource.createPixelMap();
-          imageSource.release();
         } catch (e) {
           console.warn('读取图片失败,使用默认尺寸');
+        } finally {
+          if (imageSource) { try { await imageSource.release(); } catch {} }
         }
 
         let baseName = '导入项目';
@@ -680,12 +682,15 @@ struct Index {
           pngBuffer = buffer;
         }
 
-        const destFile = fileIo.openSync(destPath,
-          fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
-        try {
-          fileIo.writeSync(destFile.fd, pngBuffer);
-        } finally {
-          fileIo.closeSync(destFile);
+        {
+          let destFile: fileIo.File | null = null;
+          try {
+            destFile = fileIo.openSync(destPath,
+              fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
+            fileIo.writeSync(destFile.fd, pngBuffer);
+          } finally {
+            if (destFile) { try { fileIo.closeSync(destFile); } catch {} }
+          }
         }
 
         if (pixelMap) {
@@ -698,19 +703,23 @@ struct Index {
               await pixelMap.scale(s, s);
             }
             const packer = image.createImagePacker();
-            const tb = await packer.packing(pixelMap, { format: 'image/png', quality: 80 });
-            const tf = fileIo.openSync(thumbPath,
-              fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
             try {
-              fileIo.writeSync(tf.fd, tb);
+              const tb = await packer.packing(pixelMap, { format: 'image/png', quality: 80 });
+              let tf: fileIo.File | null = null;
+              try {
+                tf = fileIo.openSync(thumbPath,
+                  fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
+                fileIo.writeSync(tf.fd, tb);
+              } finally {
+                if (tf) { try { fileIo.closeSync(tf); } catch {} }
+              }
             } finally {
-              fileIo.closeSync(tf);
+              await packer.release();
             }
-            await packer.release();
           } catch (e) {
             console.warn('导入时生成缩略图失败:', e);
           } finally {
-            await pixelMap.release();
+            try { await pixelMap.release(); } catch {}
           }
         }
 
@@ -733,6 +742,22 @@ struct Index {
       await this.loadProjects();
     }
     return successCount;
+  }
+
+  private readFileBuffer(uri: string): ArrayBuffer | null {
+    let file: fileIo.File | null = null;
+    try {
+      file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+      const stat = fileIo.statSync(file.fd);
+      const buf = new ArrayBuffer(stat.size);
+      fileIo.readSync(file.fd, buf);
+      return buf;
+    } catch (e) {
+      console.error('读取文件失败:', e);
+      return null;
+    } finally {
+      if (file) { try { fileIo.closeSync(file); } catch {} }
+    }
   }
 
   async importPng(): Promise<void> {
@@ -896,50 +921,48 @@ struct Index {
 
   @Builder
   buildSearchBar(): void {
-    if (!this.isMultiSelecting && this.allProjects.length > 0) {
-      Column() {
-        if (deviceInfo.apiAvailable('26.0.0')) {
-          Search({
-            value: $$this.searchText,
-            placeholder: '搜索...'
-          })
-            .backgroundColor($r('sys.color.background_tertiary'))
-            .placeholderColor($r('sys.color.font_secondary'))
-            .placeholderFont({ size: 14 })
-            .textFont({ size: 14 })
-            .onChange((value: string) => {
-              if (value.trim() === '') {
-                this.applyFilterAndSort();
-              }
-            })
-            .onSubmit((_value: string) => {
+    Column() {
+      if (deviceInfo.apiAvailable('26.0.0')) {
+        Search({
+          value: $$this.searchText,
+          placeholder: '搜索...'
+        })
+          .backgroundColor($r('sys.color.background_tertiary'))
+          .placeholderColor($r('sys.color.font_secondary'))
+          .placeholderFont({ size: 14 })
+          .textFont({ size: 14 })
+          .onChange((value: string) => {
+            if (value.trim() === '') {
               this.applyFilterAndSort();
-            })
-            .systemMaterial(new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN }))
-            .width('100%')
-        } else {
-          Search({
-            value: $$this.searchText,
-            placeholder: '搜索...'
+            }
           })
-            .backgroundColor($r('sys.color.background_tertiary'))
-            .placeholderColor($r('sys.color.font_secondary'))
-            .placeholderFont({ size: 14 })
-            .textFont({ size: 14 })
-            .onChange((value: string) => {
-              if (value.trim() === '') {
-                this.applyFilterAndSort();
-              }
-            })
-            .onSubmit((_value: string) => {
+          .onSubmit((_value: string) => {
+            this.applyFilterAndSort();
+          })
+          .systemMaterial(new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN }))
+          .width('100%')
+      } else {
+        Search({
+          value: $$this.searchText,
+          placeholder: '搜索...'
+        })
+          .backgroundColor($r('sys.color.background_tertiary'))
+          .placeholderColor($r('sys.color.font_secondary'))
+          .placeholderFont({ size: 14 })
+          .textFont({ size: 14 })
+          .onChange((value: string) => {
+            if (value.trim() === '') {
               this.applyFilterAndSort();
-            })
-            .width('100%')
-        }
+            }
+          })
+          .onSubmit((_value: string) => {
+            this.applyFilterAndSort();
+          })
+          .width('100%')
       }
-      .padding({ left: 16, right: 16 })
-      .width('100%')
     }
+    .padding({ left: 16, right: 16 })
+    .width('100%')
   }
 
   @Builder
@@ -1241,6 +1264,7 @@ struct Index {
         } else {
           this.ProjectList()
         }
+        LoadingProgress()
       }
       .clip(false)
       .width('100%')
@@ -1387,7 +1411,7 @@ struct Index {
           ],
           maxCount: this.windowWidth >= 840 ? 5 : (this.windowWidth >= 500 ? 4 : 3)
         },
-        bottomBuilder: this.isMultiSelecting ? undefined : {
+        bottomBuilder: (this.isMultiSelecting && (this.allProjects.length>0)) ? undefined : {
           builder: () => this.buildSearchBar()
         }
       },

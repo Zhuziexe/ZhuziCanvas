@@ -38,6 +38,7 @@ export struct PickColorComponent {
     const hex = this.normalizeHex(this.currentColor);
     this.originalColor = hex;
     this.applyColor(hex);
+    this.syncHsvFromRgb();
   }
 
   private normalizeHex(hex: string): string {

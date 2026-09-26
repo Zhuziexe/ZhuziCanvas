@@ -81,9 +81,10 @@ const MAX_OFFSCREEN_SIDE = 4096;
 export struct TextPage {
   @State showColorSheet: boolean = false;
   cursorController: CursorController = this.getUIContext().getCursorController();
-
   @Prop project: DrawProject;
-
+  @StorageProp('windowWidth') windowWidth: number = 0;
+  @StorageProp('windowHeight') windowHeight: number = 0;
+  @State narrowtabindex: number = 0;
   @State text: string = '文字';
   @State fontSizePx: number = 64;
   @State color: string = '#FF0000';
@@ -95,15 +96,11 @@ export struct TextPage {
   @State dispW: number = 0;
   @State dispH: number = 0;
   @State pixelCanvasReady: boolean = false;
-
   private canvasW: number = 0;
   private canvasH: number = 0;
-
   private dragBaseX: number = 0;
   private dragBaseY: number = 0;
-
   private pathStack: NavPathStack = new NavPathStack();
-
   private offCanvas: OffscreenCanvas | null = null;
   private pixelCtx: OffscreenCanvasRenderingContext2D | null = null;
 
@@ -128,7 +125,7 @@ export struct TextPage {
       onColorSelected: (c: string) => {
         this.color = c;
       },
-      onClose:()=>{
+      onClose: () => {
         this.showColorSheet = false;
       }
     })
@@ -176,7 +173,7 @@ export struct TextPage {
   }
 
   private openColorPicker(): void {
-    this.showColorSheet =true;
+    this.showColorSheet = true;
   }
 
   private clampTextPosition(): void {
@@ -189,17 +186,20 @@ export struct TextPage {
   private async confirm(): Promise<void> {
     if (this.isBusy) return;
     if (this.text.length === 0) {
-      promptAction.openToast({ message: '请输入文字' }).catch(() => {});
+      promptAction.openToast({ message: '请输入文字' }).catch(() => {
+      });
       return;
     }
     if (!this.pixelCanvasReady || this.dispW <= 0) {
-      promptAction.openToast({ message: '画布未就绪' }).catch(() => {});
+      promptAction.openToast({ message: '画布未就绪' }).catch(() => {
+      });
       return;
     }
 
     const ctx = this.pixelCtx;
     if (!ctx) {
-      promptAction.openToast({ message: '画布未就绪' }).catch(() => {});
+      promptAction.openToast({ message: '画布未就绪' }).catch(() => {
+      });
       return;
     }
 
@@ -253,14 +253,17 @@ export struct TextPage {
         };
         await ProjectStore.upsert(updated);
         AppStorage.setOrCreate('projectsRefreshToken', Date.now());
-        promptAction.openToast({ message: '已添加文字' }).catch(() => {});
+        promptAction.openToast({ message: '已添加文字' }).catch(() => {
+        });
         this.pathStack.pop();
       } else {
-        promptAction.openToast({ message: '保存失败' }).catch(() => {});
+        promptAction.openToast({ message: '保存失败' }).catch(() => {
+        });
       }
     } catch (e) {
       console.error('添加文字失败:', e);
-      promptAction.openToast({ message: '添加失败' }).catch(() => {});
+      promptAction.openToast({ message: '添加失败' }).catch(() => {
+      });
     } finally {
       this.isBusy = false;
     }
@@ -275,7 +278,7 @@ export struct TextPage {
       if (event.getModifierKeyState && event.getModifierKeyState(['Shift'])) {
         step = 10;
       }
-    }catch(err){
+    } catch (err) {
       console.error('无法getModifierKeyState');
     }
 
@@ -319,7 +322,7 @@ export struct TextPage {
       .width(this.dispW > 0 ? `${this.dispW}vp` : '100%')
       .height(this.dispH > 0 ? `${this.dispH}vp` : '100%')
       .clip(true)
-      .backgroundColor('#FFFFFF')
+      .backgroundColor($r('sys.color.background_tertiary'))
       .border({ width: 1, color: '#10000000' })
       .shadow({
         radius: 16,
@@ -357,7 +360,6 @@ export struct TextPage {
               this.cursorController.restoreDefault();
             }
           })
-
           .focusable(true)
           .focusOnTouch(true)
           .id('overlayText')
@@ -368,7 +370,7 @@ export struct TextPage {
                   .getFocusController()
                   .requestFocus('overlayText');
               } catch (error) {
-                console.error(`无法requestFocus: ${error}`)
+                console.error(`无法requestFocus: ${error}`);
               }
             }, 50);
           })
@@ -382,7 +384,41 @@ export struct TextPage {
   }
 
   @Builder
-  buildControls(): void {
+  PreviewContainer() {
+    Column() {
+      if (this.dispW > 0) {
+        this.PreviewArea()
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .padding(16)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .onAreaChange((_o: Area, n: Area) => {
+      const availW = Number(n.width) - 32;
+      const availH = Number(n.height) - 32;
+      if (availW <= 0 || availH <= 0) return;
+
+      const canvasRatio = this.canvasW / this.canvasH;
+      const availRatio = availW / availH;
+      if (availRatio > canvasRatio) {
+        this.dispH = availH;
+        this.dispW = availH * canvasRatio;
+      } else {
+        this.dispW = availW;
+        this.dispH = availW / canvasRatio;
+      }
+
+      if (this.textX === 0 && this.textY === 0 && this.dispW > 0) {
+        this.textX = this.dispW / 4;
+        this.textY = this.dispH / 2 - 20;
+      }
+    })
+  }
+
+  @Builder
+  buildInputs(): void {
     Column({ space: 12 }) {
       Row({ space: 8 }) {
         Text('文字')
@@ -402,12 +438,18 @@ export struct TextPage {
           .fontSize(14)
           .fontColor($r('sys.color.font_primary'))
           .width(48)
-        Slider({ value: this.fontSizePx, min: 12, max: 400, step: 1 })
+        Slider({
+          value: this.fontSizePx,
+          min: 12,
+          max: 400,
+          step: 1
+        })
           .selectedColor($r('app.color.brand'))
           .layoutWeight(1)
           .onChange((v: number) => {
             this.fontSizePx = Math.round(v);
           })
+          .defaultFocus(true)
         Text(`${this.fontSizePx}`)
           .fontSize(12)
           .fontColor($r('sys.color.font_secondary'))
@@ -421,7 +463,12 @@ export struct TextPage {
           .fontSize(14)
           .fontColor($r('sys.color.font_primary'))
           .width(48)
-        Slider({ value: this.textopacity * 100, min: 10, max: 100, step: 1 })
+        Slider({
+          value: this.textopacity * 100,
+          min: 10,
+          max: 100,
+          step: 1
+        })
           .selectedColor($r('app.color.brand'))
           .layoutWeight(1)
           .onChange((v: number) => {
@@ -460,10 +507,10 @@ export struct TextPage {
         .onClick(() => {
           this.openColorPicker();
         })
-        .bindSheet(this.showColorSheet,this.buildColorSheet(),{
+        .bindSheet(this.showColorSheet, this.buildColorSheet(), {
           preferType: SheetType.POPUP,
           height: SheetSize.FIT_CONTENT,
-          enableOutsideInteractive:false,
+          enableOutsideInteractive: false,
           dragBar: false,
           showClose: false,
           backgroundColor: $r('sys.color.background_primary'),
@@ -473,66 +520,131 @@ export struct TextPage {
         })
       }
       .width('100%')
-
-      Row({ space: 12 }) {
-        Button('取消')
-          .layoutWeight(1)
-          .buttonStyle(ButtonStyleMode.NORMAL)
-          .fontColor($r('app.color.brand'))
-          .onClick(() => this.pathStack.pop())
-
-        Button('添加')
-          .layoutWeight(1)
-          .buttonStyle(ButtonStyleMode.EMPHASIZED)
-          .backgroundColor($r('app.color.brand'))
-          .enabled(!this.isBusy)
-          .onClick(() => this.confirm())
-      }
-      .width('100%')
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 16 })
-    .backgroundColor($r('sys.color.background_primary'))
+  }
+
+  @Builder
+  buildButtons(): void {
+    Row({ space: 12 }) {
+      Button('取消')
+        .layoutWeight(1)
+        .buttonStyle(ButtonStyleMode.NORMAL)
+        .fontColor($r('app.color.brand'))
+        .onClick(() => this.pathStack.pop())
+
+      Button('添加')
+        .layoutWeight(1)
+        .buttonStyle(ButtonStyleMode.EMPHASIZED)
+        .backgroundColor($r('app.color.brand'))
+        .enabled(!this.isBusy)
+        .onClick(() => this.confirm())
+    }
+    .width('100%')
+  }
+
+  @Builder
+  WideLayout() {
+    Row() {
+      Column() {
+        this.PreviewContainer()
+      }
+      .layoutWeight(1)
+      .height('100%')
+
+      Divider()
+        .color($r('sys.color.font_tertiary'))
+        .vertical(true)
+        .height('100%')
+
+      Column() {
+        Column() {
+          this.buildInputs()
+        }
+        .layoutWeight(1)
+        this.buildButtons()
+      }
+      .width(340)
+      .height('100%')
+      .backgroundColor($r('sys.color.background_primary'))
+      .padding({left:16})
+    }
+    .width('100%')
+    .height('100%')
+    .padding({left:16,right:16})
+  }
+
+  @Builder
+  NormalLayout() {
+    Column({ space: 12 }) {
+      Column() {
+        this.PreviewContainer()
+      }
+      .layoutWeight(1)
+
+      this.buildInputs()
+      this.buildButtons()
+    }
+    .padding({ left: 16, right: 16 })
+  }
+
+  @Builder
+  NarrowLayout() {
+    Column() {
+      Tabs({ index: this.narrowtabindex }) {
+        TabContent() {
+          this.PreviewContainer()
+        }
+        .tabBar(SubTabBarStyle.of('预览/移动'))
+
+        TabContent() {
+          Scroll() {
+            this.buildInputs()
+          }
+          .width('100%')
+          .height('100%')
+          .align(Alignment.Top)
+          .padding({ left: 16, right: 16, top: 12 })
+        }
+        .tabBar(SubTabBarStyle.of('参数'))
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .onChange((i: number) => {
+        this.narrowtabindex = i;
+      })
+      .scrollable(false)
+
+      Column() {
+        this.buildButtons()
+      }
+      .width('100%')
+      .padding({
+        left: 16,
+        right: 16,
+        top: 8,
+        bottom: 8
+      })
+      .backgroundColor($r('sys.color.background_primary'))
+    }
+    .width('100%')
+    .height('100%')
   }
 
   build() {
     HdsNavDestination() {
-        Column() {
-          Column() {
-            if (this.dispW > 0) {
-              this.PreviewArea()
-            }
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .padding(16)
-          .justifyContent(FlexAlign.Center)
-          .alignItems(HorizontalAlign.Center)
-          .onAreaChange((_o: Area, n: Area) => {
-            const availW = Number(n.width) - 32;
-            const availH = Number(n.height) - 32;
-            if (availW <= 0 || availH <= 0) return;
-
-            const canvasRatio = this.canvasW / this.canvasH;
-            const availRatio = availW / availH;
-            if (availRatio > canvasRatio) {
-              this.dispH = availH;
-              this.dispW = availH * canvasRatio;
-            } else {
-              this.dispW = availW;
-              this.dispH = availW / canvasRatio;
-            }
-
-            if (this.textX === 0 && this.textY === 0 && this.dispW > 0) {
-              this.textX = this.dispW / 4;
-              this.textY = this.dispH / 2 - 20;
-            }
-          })
-
-          this.buildControls();
+      Column() {
+        if (this.windowWidth >= 600) {
+          this.WideLayout()
+        } else if (this.windowHeight >= 600) {
+          this.NormalLayout()
+        } else {
+          this.NarrowLayout()
         }
-        .width('100%')
-        .height('100%')
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor($r('sys.color.background_primary'))
     }
     .titleBar({
       style: {

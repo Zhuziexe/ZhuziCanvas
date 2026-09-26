@@ -4,7 +4,6 @@ export type ResizeMode = 'stretch' | 'contain' | 'cover' | 'topLeft';
 
 interface ModeOption {
   label: string;
-  desc: string;
 }
 
 const MIN_SIZE = 32;
@@ -23,10 +22,10 @@ export struct ResizeCanvasDialog {
   @State selectedMode: number = 0;
   @State sizeError: string = '';
   private modes: ModeOption[] = [
-    { label: '拉伸', desc: '内容变形填满新画布，不保持比例' },
-    { label: '等比缩放 + 居中', desc: '完整内容缩放到新画布内，周边留白' },
-    { label: '居中裁切', desc: '等比放大填满画布，超出部分裁掉' },
-    { label: '左上角对齐', desc: '内容不缩放，左上角对齐，超出裁掉不足留白' }
+    { label: '拉伸' },
+    { label: '等比缩放 + 居中'},
+    { label: '居中裁切' },
+    { label: '左上角对齐' }
   ];
 
   aboutToAppear(): void {
@@ -72,51 +71,50 @@ export struct ResizeCanvasDialog {
 
   build() {
     Column() {
-      // 内容区：可滚动
-      Column({ space: 16 }) {
-        Text('调整画布尺寸')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('sys.color.font_primary'))
+      Scroll() {
+        Column({ space: 16 }) {
+          Text('调整画布尺寸')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('sys.color.font_primary'))
+            .width('100%')
+
+          Text(`当前尺寸：${this.currentWidth} × ${this.currentHeight}`)
+            .fontSize(16)
+            .fontColor($r('sys.color.font_secondary'))
+            .width('100%')
+
+          Row({ space: 12 }) {
+            Column({ space: 4 }) {
+              Text('新宽度')
+                .fontSize(14)
+                .fontColor($r('sys.color.font_primary'))
+              TextInput({ text: this.inputW, placeholder: '宽' })
+                .maxLength(MAX_LEN)
+                .type(InputType.Number)
+                .onChange((v: string) => {
+                  this.inputW = this.filterDigits(v);
+                  this.sizeError = '';
+                })
+            }
+            .layoutWeight(1)
+
+            Column({ space: 4 }) {
+              Text('新高度')
+                .fontSize(14)
+                .fontColor($r('sys.color.font_primary'))
+              TextInput({ text: this.inputH, placeholder: '高' })
+                .maxLength(MAX_LEN)
+                .type(InputType.Number)
+                .onChange((v: string) => {
+                  this.inputH = this.filterDigits(v);
+                  this.sizeError = '';
+                })
+            }
+            .layoutWeight(1)
+          }
           .width('100%')
 
-        Text(`当前尺寸：${this.currentWidth} × ${this.currentHeight}`)
-          .fontSize(16)
-          .fontColor($r('sys.color.font_secondary'))
-          .width('100%')
-
-        Row({ space: 12 }) {
-          Column({ space: 4 }) {
-            Text('新宽度')
-              .fontSize(14)
-              .fontColor($r('sys.color.font_primary'))
-            TextInput({ text: this.inputW, placeholder: '宽' })
-              .maxLength(MAX_LEN)
-              .type(InputType.Number)
-              .onChange((v: string) => {
-                this.inputW = this.filterDigits(v);
-                this.sizeError = '';
-              })
-          }
-          .layoutWeight(1)
-
-          Column({ space: 4 }) {
-            Text('新高度')
-              .fontSize(14)
-              .fontColor($r('sys.color.font_primary'))
-            TextInput({ text: this.inputH, placeholder: '高' })
-              .maxLength(MAX_LEN)
-              .type(InputType.Number)
-              .onChange((v: string) => {
-                this.inputH = this.filterDigits(v);
-                this.sizeError = '';
-              })
-          }
-          .layoutWeight(1)
-        }
-        .width('100%')
-
-        Scroll() {
           Column({ space: 8 }) {
             Text('现有内容的处理方式')
               .fontSize(14)
@@ -131,11 +129,6 @@ export struct ResizeCanvasDialog {
                     ? $r('app.color.brand')
                     : $r('sys.color.font_primary'))
                   .width('100%')
-
-                Text(item.desc)
-                  .fontSize(12)
-                  .fontColor($r('sys.color.font_secondary'))
-                  .width('100%')
               }
               .width('100%')
               .padding({
@@ -149,10 +142,10 @@ export struct ResizeCanvasDialog {
                 width: this.selectedMode === index ? 1.5 : 0.5,
                 color: this.selectedMode === index
                   ? $r('app.color.brand')
-                  : $r('sys.color.font_tertiary')
+                  : $r('sys.color.font_primary')
               })
               .backgroundColor(this.selectedMode === index
-                ? $r('sys.color.background_tertiary')
+                ? $r('sys.color.background_secondary')
                 : Color.Transparent)
               .onClick(() => {
                 this.selectedMode = index;
@@ -160,19 +153,22 @@ export struct ResizeCanvasDialog {
             }, (item: ModeOption) => item.label)
           }
           .width('100%')
-        }
-        .scrollBar(BarState.Off)
-        .edgeEffect(EdgeEffect.Spring)
-        .align(Alignment.Top)
-        .width('100%')
 
-        if (this.sizeError.length > 0) {
-          Text(this.sizeError)
-            .fontSize(12)
-            .fontColor($r('sys.color.warning'))
-            .width('100%')
+          if (this.sizeError.length > 0) {
+            Text(this.sizeError)
+              .fontSize(12)
+              .fontColor($r('sys.color.warning'))
+              .width('100%')
+          }
         }
+        .margin({ bottom: 16 })
       }
+      .width('100%')
+      .scrollBar(BarState.Off)
+      .align(Alignment.Top)
+      .edgeEffect(EdgeEffect.Spring)
+      .layoutWeight(1)
+      .constraintSize({maxHeight:371})
 
       Row({ space: 12 }) {
         Button('取消')
@@ -205,12 +201,7 @@ export struct ResizeCanvasDialog {
       }
       .width('100%')
     }
-    .padding({
-      left: 24,
-      right: 24,
-      top: 12,
-      bottom: 24
-    })
+    .padding(24)
     .width('100%')
   }
 }

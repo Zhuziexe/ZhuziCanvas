@@ -70,6 +70,11 @@ export struct ImageOverlayPage {
   };
   @Prop overlayUri: string = '';
 
+  @StorageProp('windowWidth') windowWidth: number = 0;
+  @StorageProp('windowHeight') windowHeight: number = 0;
+
+  @State narrowtabindex: number = 0;
+
   @State offsetX: number = 0;
   @State offsetY: number = 0;
   @State overlayScale: number = 1;
@@ -213,8 +218,8 @@ export struct ImageOverlayPage {
       if (event.getModifierKeyState && event.getModifierKeyState(['Shift'])) {
         step *= 10;
       }
-    }catch(err){
-      console.error('无法getModifierKeyState')
+    } catch (err) {
+      console.error('无法getModifierKeyState');
     }
 
     switch (event.keyCode) {
@@ -359,8 +364,8 @@ export struct ImageOverlayPage {
             y: px2vp(this.offsetY) * this.displayScale
           })
           .border({
-            width:2,
-            color:$r('app.color.brand')
+            width: 2,
+            color: $r('app.color.brand')
           })
           .draggable(false)
           .interpolation(ImageInterpolation.Medium)
@@ -392,7 +397,7 @@ export struct ImageOverlayPage {
                   .getFocusController()
                   .requestFocus('overlayImage');
               } catch (error) {
-                console.error(`无法requestFocus: ${error}`)
+                console.error(`无法requestFocus: ${error}`);
               }
             }, 50);
           })
@@ -402,16 +407,42 @@ export struct ImageOverlayPage {
     .height(px2vp(this.project.height) * this.displayScale)
     .clip(true)
     .backgroundColor($r('sys.color.background_tertiary'))
+    .border({ width: 1, color: '#10000000' })
+    .shadow({
+      radius: 16,
+      color: 'rgba(0, 0, 0, 0.10)',
+      offsetX: 0,
+      offsetY: 4
+    })
   }
 
   @Builder
-  buildControls(): void {
+  PreviewContainer() {
+    Column() {
+      if (this.overlayReady && this.displayScale > 0) {
+        this.PreviewArea()
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .padding(16)
+    .onAreaChange((_oldArea: Area, newArea: Area) => {
+      this.containerW = Number(newArea.width);
+      this.containerH = Number(newArea.height);
+      this.updateDisplayScale();
+    })
+  }
+
+  @Builder
+  buildInputs(): void {
     Column({ space: 16 }) {
       Row({ space: 12 }) {
         Text('大小')
           .fontSize(14)
           .fontColor($r('sys.color.font_secondary'))
-          .width(40)
+          .width(48)
         Slider({
           min: 10,
           max: 500,
@@ -440,54 +471,45 @@ export struct ImageOverlayPage {
           .textAlign(TextAlign.End)
       }
       .width('100%')
-
-      Row({ space: 12 }) {
-        Button('取消')
-          .layoutWeight(1)
-          .buttonStyle(ButtonStyleMode.NORMAL)
-          .fontColor($r('app.color.brand'))
-          .enabled(!this.isSaving)
-          .onClick(() => {
-            this.pathStack.pop();
-          })
-        Button(this.isSaving ? '保存中…' : '确定')
-          .layoutWeight(1)
-          .buttonStyle(ButtonStyleMode.EMPHASIZED)
-          .backgroundColor($r('app.color.brand'))
-          .enabled(!this.isSaving && this.overlayReady)
-          .onClick(() => {
-            this.handleConfirm();
-          })
-      }
-      .width('100%')
     }
     .width('100%')
-    .padding({ left: 24, right: 24, top: 16, bottom: 16 })
-    .backgroundColor($r('sys.color.background_primary'))
-    .borderRadius({ topLeft: 16, topRight: 16 })
+  }
+
+  @Builder
+  buildButtons(): void {
+    Row({ space: 12 }) {
+      Button('取消')
+        .layoutWeight(1)
+        .buttonStyle(ButtonStyleMode.NORMAL)
+        .fontColor($r('app.color.brand'))
+        .enabled(!this.isSaving)
+        .onClick(() => {
+          this.pathStack.pop();
+        })
+      Button(this.isSaving ? '保存中…' : '确定')
+        .layoutWeight(1)
+        .buttonStyle(ButtonStyleMode.EMPHASIZED)
+        .backgroundColor($r('app.color.brand'))
+        .enabled(!this.isSaving && this.overlayReady)
+        .onClick(() => {
+          this.handleConfirm();
+        })
+    }
+    .width('100%')
   }
 
   build() {
     HdsNavDestination() {
-      Column() {
+      Column({ space: 12 }) {
         Column() {
-          if (this.overlayReady && this.displayScale > 0) {
-            this.PreviewArea()
-          }
+          this.PreviewContainer()
         }
         .layoutWeight(1)
-        .width('100%')
-        .justifyContent(FlexAlign.Center)
-        .alignItems(HorizontalAlign.Center)
-        .padding(16)
-        .onAreaChange((_oldArea: Area, newArea: Area) => {
-          this.containerW = Number(newArea.width);
-          this.containerH = Number(newArea.height);
-          this.updateDisplayScale();
-        })
 
-        this.buildControls()
+        this.buildInputs()
+        this.buildButtons()
       }
+      .padding({ left: 16, right: 16 })
       .width('100%')
       .height('100%')
       .backgroundColor($r('sys.color.background_primary'))
@@ -500,7 +522,7 @@ export struct ImageOverlayPage {
         }
       },
       enableComponentSafeArea: true,
-      style:{
+      style: {
         systemMaterialEffect: {
           materialType: hdsMaterial.MaterialType.ADAPTIVE,
           materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
