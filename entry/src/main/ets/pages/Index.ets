@@ -1264,7 +1264,6 @@ struct Index {
         } else {
           this.ProjectList()
         }
-        LoadingProgress()
       }
       .clip(false)
       .width('100%')

@@ -583,15 +583,6 @@ export struct PickColorComponent {
       }
       .width('100%')
     }
-    .onKeyEvent((e: KeyEvent) => {
-      if (e.type === KeyType.Down &&
-        (e.keyCode === KeyCode.KEYCODE_ENTER ||
-          e.keyCode === KeyCode.KEYCODE_NUMPAD_ENTER)) {
-        this.confirm();
-        return true;
-      }
-      return false;
-    })
     .width('100%')
     .padding(20)
   }
